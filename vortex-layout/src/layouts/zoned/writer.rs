@@ -38,7 +38,7 @@ use crate::LayoutWriterContext;
 use crate::layouts::zoned::AggregateStatsAccumulator;
 use crate::layouts::zoned::ZonedLayout;
 use crate::layouts::zoned::aggregate_partials;
-use crate::layouts::zoned::schema::default_bounded_stat_max_bytes;
+use crate::layouts::zoned::aggregates::default_zoned_aggregate_fns;
 use crate::segments::SegmentSinkRef;
 use crate::sequence::SendableSequentialStream;
 use crate::sequence::SequencePointer;
@@ -50,6 +50,7 @@ use crate::sequence::SequentialStreamExt;
 ///
 /// The input stream is assumed to already be partitioned into one chunk per zone, except
 /// possibly the final partial zone.
+#[derive(Clone)]
 pub struct ZonedLayoutOptions {
     /// The size of a statistics block
     pub block_size: NonZeroUsize,
