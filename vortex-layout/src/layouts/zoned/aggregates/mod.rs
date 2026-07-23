@@ -3,8 +3,115 @@
 
 //! Aggregate functions selected by the zoned layout.
 
-// TODO (joacoc) Allow dead code here until the writer interface for accessing the
-// Bloom filter lands in https://github.com/vortex-data/vortex/pull/9413,
-// unless another access point exists that I am unaware of.
-#[allow(dead_code)]
+use std::sync::Arc;
+
+use vortex_array::aggregate_fn::AggregateFnRef;
+use vortex_array::aggregate_fn::AggregateFnVTableExt;
+use vortex_array::aggregate_fn::EmptyOptions;
+use vortex_array::aggregate_fn::NumericalAggregateOpts;
+use vortex_array::aggregate_fn::fns::bounded_max::BoundedMax;
+use vortex_array::aggregate_fn::fns::bounded_max::BoundedMaxOptions;
+use vortex_array::aggregate_fn::fns::bounded_min::BoundedMin;
+use vortex_array::aggregate_fn::fns::bounded_min::BoundedMinOptions;
+use vortex_array::aggregate_fn::fns::max::Max;
+use vortex_array::aggregate_fn::fns::min::Min;
+use vortex_array::aggregate_fn::fns::nan_count::NanCount;
+use vortex_array::aggregate_fn::fns::null_count::NullCount;
+use vortex_array::aggregate_fn::session::AggregateFnSessionExt;
+use vortex_array::dtype::DType;
+use vortex_session::VortexSession;
+mod min_max;
+
+pub(in crate::layouts::zoned) use bloom_filter::BloomFilter;
+pub(in crate::layouts::zoned) use bloom_filter::bloom_contains;
+pub(in crate::layouts::zoned) use bloom_filter::i64_value;
+
+use crate::layouts::zoned::schema::default_bounded_stat_max_bytes;
+
 pub mod bloom_filter;
+
+pub(super) fn default_zoned_aggregate_fns(
+    dtype: &DType,
+    session: &VortexSession,
+) -> Arc<[AggregateFnRef]> {
+    let (max, min) = match dtype {
+        DType::Utf8(_) | DType::Binary(_) => (
+            BoundedMax.bind(BoundedMaxOptions {
+                max_bytes: default_bounded_stat_max_bytes(),
+            }),
+            BoundedMin.bind(BoundedMinOptions {
+                max_bytes: default_bounded_stat_max_bytes(),
+            }),
+        ),
+        _ => (
+            Max.bind(NumericalAggregateOpts::skip_nans()),
+            Min.bind(NumericalAggregateOpts::skip_nans()),
+        ),
+    };
+
+    // Sum is deliberately absent: zone maps exist to prune, and a zone sum prunes nothing.
+    // Its semantics are also unsettled - null-on-empty was changed in #9113 and reverted in
+    // #9324 - so it is not a stat to record in every zone of every file, let alone freeze
+    // into an edition. File-level statistics still record `Stat::Sum` via `PRUNING_STATS`.
+    let mut aggregate_fns = vec![
+        max,
+        min,
+        NanCount.bind(EmptyOptions),
+        NullCount.bind(EmptyOptions),
+    ];
+
+    // Stats from spatial extension types are discovered from the registry at runtime instead.
+    aggregate_fns.extend(session.aggregate_fns().zone_stat_defaults(dtype));
+
+    aggregate_fns.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use vortex_array::aggregate_fn::AggregateFnVTableExt;
+    use vortex_array::aggregate_fn::fns::sum::Sum;
+    use vortex_array::dtype::DType;
+    use vortex_array::dtype::Nullability;
+    use vortex_array::dtype::PType;
+    use vortex_array::extension::datetime::TimeUnit;
+    use vortex_array::extension::datetime::Timestamp;
+
+    use super::BloomFilter;
+    use super::bloom_filter::BloomOptions;
+    use super::default_zoned_aggregate_fns;
+
+    #[test]
+    fn default_aggregates_exclude_bloom_filter() {
+        let aggregate_fns =
+            default_zoned_aggregate_fns(&PType::I64.into(), &vortex_array::array_session());
+        let bloom = BloomFilter.bind(BloomOptions::default());
+
+        assert!(
+            aggregate_fns
+                .iter()
+                .all(|aggregate_fn| aggregate_fn != &bloom)
+        );
+    }
+
+    #[test]
+    fn default_aggregates_include_sum_for_numeric_dtype() {
+        let aggregate_fns =
+            default_zoned_aggregate_fns(&PType::I32.into(), &vortex_array::array_session());
+
+        assert!(aggregate_fns[2].is::<Sum>());
+    }
+
+    #[test]
+    fn default_aggregates_skip_sum_for_non_summable_dtype() {
+        let dtype = DType::Extension(
+            Timestamp::new(TimeUnit::Microseconds, Nullability::Nullable).erased(),
+        );
+        let aggregate_fns = default_zoned_aggregate_fns(&dtype, &vortex_array::array_session());
+
+        assert!(
+            aggregate_fns
+                .iter()
+                .all(|aggregate_fn| !aggregate_fn.is::<Sum>())
+        );
+    }
+}

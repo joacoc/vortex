@@ -12,19 +12,6 @@ use parking_lot::Mutex;
 use vortex_array::IntoArray;
 use vortex_array::VortexSessionExecute;
 use vortex_array::aggregate_fn::AggregateFnRef;
-use vortex_array::aggregate_fn::AggregateFnVTableExt;
-use vortex_array::aggregate_fn::EmptyOptions;
-use vortex_array::aggregate_fn::NumericalAggregateOpts;
-use vortex_array::aggregate_fn::fns::bounded_max::BoundedMax;
-use vortex_array::aggregate_fn::fns::bounded_max::BoundedMaxOptions;
-use vortex_array::aggregate_fn::fns::bounded_min::BoundedMin;
-use vortex_array::aggregate_fn::fns::bounded_min::BoundedMinOptions;
-use vortex_array::aggregate_fn::fns::max::Max;
-use vortex_array::aggregate_fn::fns::min::Min;
-use vortex_array::aggregate_fn::fns::nan_count::NanCount;
-use vortex_array::aggregate_fn::fns::null_count::NullCount;
-use vortex_array::aggregate_fn::session::AggregateFnSessionExt;
-use vortex_array::dtype::DType;
 use vortex_error::VortexError;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
@@ -38,7 +25,7 @@ use crate::LayoutWriterContext;
 use crate::layouts::zoned::AggregateStatsAccumulator;
 use crate::layouts::zoned::ZonedLayout;
 use crate::layouts::zoned::aggregate_partials;
-use crate::layouts::zoned::schema::default_bounded_stat_max_bytes;
+use crate::layouts::zoned::aggregates::default_zoned_aggregate_fns;
 use crate::segments::SegmentSinkRef;
 use crate::sequence::SendableSequentialStream;
 use crate::sequence::SequencePointer;
@@ -50,6 +37,7 @@ use crate::sequence::SequentialStreamExt;
 ///
 /// The input stream is assumed to already be partitioned into one chunk per zone, except
 /// possibly the final partial zone.
+#[derive(Clone)]
 pub struct ZonedLayoutOptions {
     /// The size of a statistics block
     pub block_size: NonZeroUsize,
@@ -199,39 +187,6 @@ impl LayoutStrategy for ZonedStrategy {
     }
 }
 
-fn default_zoned_aggregate_fns(dtype: &DType, session: &VortexSession) -> Arc<[AggregateFnRef]> {
-    let (max, min) = match dtype {
-        DType::Utf8(_) | DType::Binary(_) => (
-            BoundedMax.bind(BoundedMaxOptions {
-                max_bytes: default_bounded_stat_max_bytes(),
-            }),
-            BoundedMin.bind(BoundedMinOptions {
-                max_bytes: default_bounded_stat_max_bytes(),
-            }),
-        ),
-        _ => (
-            Max.bind(NumericalAggregateOpts::skip_nans()),
-            Min.bind(NumericalAggregateOpts::skip_nans()),
-        ),
-    };
-
-    // Sum is deliberately absent: zone maps exist to prune, and a zone sum prunes nothing.
-    // Its semantics are also unsettled - null-on-empty was changed in #9113 and reverted in
-    // #9324 - so it is not a stat to record in every zone of every file, let alone freeze
-    // into an edition. File-level statistics still record `Stat::Sum` via `PRUNING_STATS`.
-    let mut aggregate_fns = vec![
-        max,
-        min,
-        NanCount.bind(EmptyOptions),
-        NullCount.bind(EmptyOptions),
-    ];
-
-    // Stats from spatial extension types are discovered from the registry at runtime instead.
-    aggregate_fns.extend(session.aggregate_fns().zone_stat_defaults(dtype));
-
-    aggregate_fns.into()
-}
-
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -242,10 +197,13 @@ mod tests {
     use vortex_array::aggregate_fn::fns::bounded_min::BoundedMin;
     use vortex_array::aggregate_fn::fns::max::Max;
     use vortex_array::aggregate_fn::fns::min::Min;
+    use vortex_array::aggregate_fn::fns::nan_count::NanCount;
     use vortex_array::aggregate_fn::fns::sum::Sum;
     use vortex_array::arrays::ChunkedArray;
+    use vortex_array::dtype::DType;
     use vortex_array::dtype::Nullability;
     use vortex_array::dtype::PType;
+    use vortex_array::expr::stats::NullCount;
     use vortex_array::extension::datetime::TimeUnit;
     use vortex_array::extension::datetime::Timestamp;
     use vortex_buffer::buffer;
@@ -260,6 +218,7 @@ mod tests {
     use crate::layouts::chunked::writer::ChunkedLayoutStrategy;
     use crate::layouts::flat::writer::FlatLayoutStrategy;
     use crate::layouts::zoned::Zoned;
+    use crate::layouts::zoned::schema::default_bounded_stat_max_bytes;
     use crate::segments::TestSegments;
     use crate::sequence::SequenceId;
     use crate::sequence::SequentialArrayStreamExt;
