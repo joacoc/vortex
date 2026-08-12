@@ -134,8 +134,6 @@ impl ScalarFnVTable for BloomContains {
     ) -> VortexResult<ArrayRef> {
         let filters = args.get(0)?.execute::<VarBinViewArray>(ctx)?;
 
-        // The Bloom search is performed using valid scalars [BloomPartial::contains_valid_scalar].
-        //
         // If the needle accepts an array of values, e.g., Array[1, 2, 3],
         // the following code should be updated.
         let needle_array = args.get(1)?;

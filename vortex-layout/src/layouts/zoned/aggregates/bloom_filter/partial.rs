@@ -60,7 +60,7 @@ impl BloomPartial {
         }
     }
 
-    /// Check whether a hash is (probably) present in the filter.
+    /// Checks whether a hash is (probably) present in the filter.
     pub(super) fn find_hash(&self, hash: u64) -> bool {
         let idx = self.block_index(hash, self.blocks.len()) as usize;
         let mask = self.make_mask(hash as u32);

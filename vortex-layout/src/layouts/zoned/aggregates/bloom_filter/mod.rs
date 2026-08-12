@@ -31,18 +31,11 @@ pub use partial::BloomPartial;
 
 use crate::layouts::zoned::skip_index::bloom::is_bloom_valid_dtype;
 
-// (joacoc) Opted for blocks_count as the main way to tune
-// the Bloom filter, but there are also other ways, like
-// setting the false-positive probability (FPP) and
-// number of distinct values (NDV). Given the statistics
-// collected from a random subset of values, they could be
-// used to determine the number of blocks automatically,
-// which I think is more aligned with how Vortex works with
-// encoders. But for now, this is a simple approach that
-// pushes the block-count selection back to the user
-// and otherwise defaults to [DEFAULT_BLOCKS_COUNT].
-//
-// In case that the blocks count stays as is,
+// 1. (joacoc) Opted for blocks_count as a simpler way to tune
+// the Bloom filter, even though there are other ways.
+// 2. (joacoc) I think the optimal could be using statistics, similar
+// to how vortex encoder selection works.
+// 3. (joacoc) In case that the tune/options stays as is,
 // a guide on how to select the number of blocks
 // would be great.
 
@@ -51,11 +44,11 @@ use crate::layouts::zoned::skip_index::bloom::is_bloom_valid_dtype;
 pub struct BloomOptions {
     /// Number of blocks in the split block Bloom filter (SBBF).
     ///
+    /// Defaults to: [DEFAULT_BLOCKS_COUNT].
+    ///
     /// The filter is partitioned into 256-bit blocks. More blocks reduce the
     /// number of distinct values assigned to each block, reducing the
     /// false-positive rate at the cost of increased filter size.
-    ///
-    /// Defaults to: [DEFAULT_BLOCKS_COUNT].
     ///
     /// ### Block size and memory usage
     ///
