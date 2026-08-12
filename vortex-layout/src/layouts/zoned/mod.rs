@@ -512,6 +512,8 @@ mod tests {
     use crate::LayoutBuildContext;
     use crate::children::OwnedLayoutChildren;
     use crate::layouts::flat::FlatLayout;
+    use crate::layouts::zoned::aggregates::bloom_filter::BloomFilter;
+    use crate::layouts::zoned::aggregates::bloom_filter::BloomOptions;
     use crate::segments::SegmentId;
 
     fn aggregate_spec(aggregate_fn: AggregateFnRef) -> AggregateSpecProto {
@@ -528,6 +530,12 @@ mod tests {
             aggregate_specs: Arc::new([
                 aggregate_spec(Max.bind(NumericalAggregateOpts::skip_nans())),
                 aggregate_spec(Min.bind(NumericalAggregateOpts::skip_nans())),
+            ]),
+        })]
+    #[case::bloom(ZonedMetadata {
+            zone_len: 1,
+            aggregate_specs: Arc::new([
+                aggregate_spec(BloomFilter.bind(BloomOptions::default())),
             ]),
         })]
     fn test_metadata_serialization(#[case] metadata: ZonedMetadata) {

@@ -19,7 +19,6 @@
 
 #![expect(clippy::expect_used)]
 
-use std::num::NonZeroU8;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -62,10 +61,7 @@ const MISS: i64 = 503;
 fn bloom() -> BloomSkipIndex {
     // A deliberately roomy filter keeps this correctness test's false-positive outcome
     // deterministic. False positives are valid Bloom behavior, but false negatives are not.
-    BloomSkipIndex::new(BloomOptions::new(
-        NonZeroUsize::new(1024).expect("1024 is non-zero"),
-        NonZeroU8::new(5).expect("5 is non-zero"),
-    ))
+    BloomSkipIndex::new(BloomOptions::default())
 }
 
 fn session(index: Option<&dyn SkipIndex>) -> VortexSession {

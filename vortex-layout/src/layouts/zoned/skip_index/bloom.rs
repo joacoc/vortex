@@ -11,16 +11,12 @@ use vortex_array::aggregate_fn::AggregateFnVTable;
 use vortex_array::aggregate_fn::AggregateFnVTableExt;
 use vortex_array::aggregate_fn::session::AggregateFnSessionExt;
 use vortex_array::arrays::BoolArray;
-use vortex_array::arrays::ConstantArray;
 use vortex_array::arrays::VarBinViewArray;
 use vortex_array::arrays::varbinview::VarBinViewArrayExt;
 use vortex_array::dtype::DType;
-use vortex_array::dtype::Nullability;
-use vortex_array::dtype::PType;
 use vortex_array::expr::Expression;
 use vortex_array::expr::is_root;
 use vortex_array::expr::not;
-use vortex_array::scalar::Scalar;
 use vortex_array::scalar_fn::Arity;
 use vortex_array::scalar_fn::ChildName;
 use vortex_array::scalar_fn::ExecutionArgs;
@@ -42,25 +38,25 @@ use vortex_error::vortex_err;
 use vortex_session::VortexSession;
 use vortex_session::registry::CachedId;
 
-use super::super::aggregates::BloomFilter;
-use super::super::aggregates::bloom_contains;
-pub use super::super::aggregates::bloom_filter::BloomOptions;
-use super::super::aggregates::i64_value;
 use super::SkipIndex;
+pub use crate::layouts::zoned::aggregates::bloom_filter::BloomFilter;
+pub use crate::layouts::zoned::aggregates::bloom_filter::BloomOptions;
+pub use crate::layouts::zoned::aggregates::bloom_filter::BloomPartial;
 
-/// Bloom skipping index for `i64` equality predicates.
+/// Bloom skip index for constant-equality predicates.
+///
+/// TODO(joacoc): Add documentation about the Bloom skip index
+/// and how it works here.
 #[derive(Clone, Debug, Default)]
 pub struct BloomSkipIndex {
     options: BloomOptions,
 }
 
 impl BloomSkipIndex {
-    /// Create an index with explicit Bloom tuning.
     pub fn new(options: BloomOptions) -> Self {
         Self { options }
     }
 
-    /// The persisted Bloom options.
     pub fn options(&self) -> &BloomOptions {
         &self.options
     }
@@ -82,7 +78,7 @@ impl SkipIndex for BloomSkipIndex {
     }
 }
 
-/// Probe scalar function: test one `i64` literal against each binary Bloom state.
+/// Probe scalar function: test one literal against each binary Bloom state.
 #[derive(Clone, Debug)]
 struct BloomContains;
 
@@ -90,7 +86,7 @@ impl ScalarFnVTable for BloomContains {
     type Options = BloomOptions;
 
     fn id(&self) -> ScalarFnId {
-        static ID: CachedId = CachedId::new("vortex.bloom_contains.i64.v1");
+        static ID: CachedId = CachedId::new("vortex.bloom_contains.v1");
         *ID
     }
 
@@ -106,6 +102,9 @@ impl ScalarFnVTable for BloomContains {
         Arity::Exact(2)
     }
 
+    /// Only two children are expected.
+    /// The first child represents the filter as a byte sequence,
+    /// while the second child represents the literal value to search for (the needle).
     fn child_name(&self, _options: &Self::Options, child_idx: usize) -> ChildName {
         match child_idx {
             0 => ChildName::from("filter"),
@@ -120,9 +119,10 @@ impl ScalarFnVTable for BloomContains {
             "bloom filter must be Binary"
         );
         vortex_ensure!(
-            matches!(args[1], DType::Primitive(PType::I64, _)),
-            "bloom needle must be i64"
+            is_bloom_valid_dtype(&args[1]),
+            "bloom needle must be bool, primitive, decimal, utf8, binary or extension"
         );
+
         Ok(DType::Bool(args[0].nullability() | args[1].nullability()))
     }
 
@@ -133,37 +133,43 @@ impl ScalarFnVTable for BloomContains {
         ctx: &mut ExecutionCtx,
     ) -> VortexResult<ArrayRef> {
         let filters = args.get(0)?.execute::<VarBinViewArray>(ctx)?;
+
+        // The Bloom search is performed using valid scalars [BloomPartial::contains_valid_scalar].
+        //
+        // If the needle accepts an array of values, e.g., Array[1, 2, 3],
+        // the following code should be updated.
         let needle_array = args.get(1)?;
         let needle = needle_array
             .as_constant()
             .ok_or_else(|| vortex_err!("bloom needle must be constant"))?;
-        let Some(needle) = i64_value(&needle)? else {
-            return Ok(ConstantArray::new(
-                Scalar::null(DType::Bool(Nullability::Nullable)),
-                args.row_count(),
-            )
-            .into_array());
-        };
 
         let validity = filters.varbinview_validity();
         let valid = validity.execute_mask(filters.len(), ctx)?;
+
+        // Quick return if the needle is invalid.
+        if !needle.is_valid() {
+            let possible = vec![false; filters.len()];
+            return Ok(BoolArray::new(BitBuffer::from_iter(possible), validity).into_array());
+        }
+
         let mut possible = Vec::with_capacity(filters.len());
         for (idx, is_valid) in valid.iter().enumerate() {
-            if is_valid {
-                let filter = filters.bytes_at(idx);
-                vortex_ensure!(
-                    filter.len() == options.bytes().get(),
-                    "stored bloom byte length does not match options"
-                );
-                possible.push(bloom_contains(
-                    filter.as_slice(),
-                    needle,
-                    options.hashes().get(),
-                ));
-            } else {
+            if !is_valid {
                 possible.push(false);
+                continue;
             }
+
+            let bytes = filters.bytes_at(idx);
+            let partial = BloomPartial::try_from(bytes.as_slice())?;
+
+            vortex_ensure!(
+                partial.len() == options.blocks().get(),
+                "stored bloom length does not match options"
+            );
+
+            possible.push(partial.contains_valid_scalar(&needle)?);
         }
+
         Ok(BoolArray::new(BitBuffer::from_iter(possible), validity).into_array())
     }
 
@@ -187,6 +193,9 @@ impl StatsRewriteRule for BloomEqRewrite {
         Binary.id()
     }
 
+    /// Only works for root literal comparisons and valid [DTypes].
+    ///
+    /// E.g. `eq(root(), lit(5i32))` or `eq(lit(5i32), root())`
     fn falsify(
         &self,
         expr: &Expression,
@@ -203,9 +212,8 @@ impl StatsRewriteRule for BloomEqRewrite {
         } else {
             return Ok(None);
         };
-        if !matches!(ctx.return_dtype(column)?, DType::Primitive(PType::I64, _))
-            || literal.as_::<Literal>().is_null()
-        {
+
+        if !is_bloom_valid_dtype(&ctx.return_dtype(column)?) || literal.as_::<Literal>().is_null() {
             return Ok(None);
         }
 
@@ -215,38 +223,64 @@ impl StatsRewriteRule for BloomEqRewrite {
     }
 }
 
+/// Returns true if the type is valid for the bloom index to acc/contain.
+///
+/// This is defined by the available implementations in
+/// [crate::layouts::zoned::aggregates::bloom::constant] and
+/// [crate::layouts::zoned::aggregates::bloom::canonical]
+pub(in crate::layouts::zoned) fn is_bloom_valid_dtype(dtype: &DType) -> bool {
+    match dtype {
+        DType::Extension(ext) => is_bloom_valid_dtype(ext.storage_dtype()),
+        DType::Bool(_)
+        | DType::Primitive(..)
+        | DType::Decimal(..)
+        | DType::Utf8(_)
+        | DType::Binary(_) => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU8;
-    use std::num::NonZeroUsize;
     use std::sync::Arc;
 
+    use rstest::rstest;
+    use vortex_array::ArrayRef;
+    use vortex_array::Canonical;
+    use vortex_array::Columnar;
+    use vortex_array::IntoArray;
+    use vortex_array::VortexSessionExecute;
+    use vortex_array::aggregate_fn::AggregateFnVTable;
+    use vortex_array::aggregate_fn::AggregateFnVTableExt;
+    use vortex_array::arrays::BoolArray;
+    use vortex_array::arrays::PrimitiveArray;
     use vortex_array::arrays::StructArray;
+    use vortex_array::arrays::VarBinArray;
+    use vortex_array::assert_arrays_eq;
     use vortex_array::dtype::DType;
     use vortex_array::dtype::Nullability;
     use vortex_array::dtype::PType;
+    use vortex_array::expr::Expression;
     use vortex_array::expr::eq;
+    use vortex_array::expr::gt_eq;
     use vortex_array::expr::lit;
     use vortex_array::expr::root;
+    use vortex_array::scalar::Scalar;
     use vortex_array::validity::Validity;
+    use vortex_buffer::buffer;
     use vortex_error::VortexResult;
 
-    use super::BloomOptions;
     use super::BloomSkipIndex;
     use super::SkipIndex;
+    use crate::layouts::zoned::aggregates::bloom_filter::BloomFilter;
+    use crate::layouts::zoned::aggregates::bloom_filter::BloomOptions;
     use crate::layouts::zoned::zone_map::ZoneMap;
-
-    fn small_options() -> BloomOptions {
-        BloomOptions::new(
-            NonZeroUsize::new(64).expect("64 is non-zero"),
-            NonZeroU8::new(3).expect("3 is non-zero"),
-        )
-    }
+    use crate::test::SESSION;
 
     #[test]
     fn missing_stat_stays_inconclusive() -> VortexResult<()> {
         let session = vortex_array::array_session();
-        let index = BloomSkipIndex::new(small_options());
+        let index = BloomSkipIndex::new(BloomOptions::default());
         index.register(&session);
         let predicate = eq(root(), lit(42i64));
         let proof = predicate
@@ -264,6 +298,87 @@ mod tests {
             16,
         )?;
         assert!(zone_map.prune(&proof, &session)?.all_false());
+        Ok(())
+    }
+
+    /// Similar zone map tests as the ones in [crate::layouts::zoned::tests]
+    /// but using BloomFilter rather than max/min zones.
+    fn build_bloom_zone_map(dtype: DType, batch: ArrayRef) -> ZoneMap {
+        let bloom = BloomFilter;
+        let options = BloomOptions::default();
+
+        // If index is not registered there will be no warning,
+        // but the index will return false for everything.
+        //
+        // (joacoc) should be considered a warning for missing aggregatefns?
+        BloomSkipIndex::new(options.clone()).register(&SESSION);
+        let mut ctx = SESSION.create_execution_ctx();
+
+        let mut zone_filter = bloom.empty_partial(&options, &dtype).unwrap();
+        bloom
+            .accumulate(
+                &mut zone_filter,
+                &Columnar::Canonical(batch.execute::<Canonical>(&mut ctx).unwrap()),
+                &mut ctx,
+            )
+            .unwrap();
+
+        let zone_filter_as_scalar = bloom.to_scalar(&zone_filter).unwrap();
+        let zone_filter_as_bytes = zone_filter_as_scalar.as_binary().value().unwrap().to_vec();
+        let zone_filter_as_varbin =
+            VarBinArray::from_nullable_bytes(vec![Some(zone_filter_as_bytes.as_slice())]);
+
+        let bloom = BloomFilter.bind(options);
+        let zone_filter_struct = StructArray::from_fields(&[(
+            bloom.clone().to_string(),
+            zone_filter_as_varbin.into_array(),
+        )])
+        .unwrap();
+
+        ZoneMap::try_new(dtype, zone_filter_struct, Arc::new([bloom]), 1, 10).unwrap()
+    }
+
+    fn assert_prune(zone_map: &ZoneMap, dtype: &DType, expr: Expression, expected: [bool; 1]) {
+        let mut ctx = SESSION.create_execution_ctx();
+        let pruning_expr = expr.falsify(dtype, &SESSION).unwrap().unwrap();
+        let mask = zone_map.prune(&pruning_expr, &SESSION).unwrap();
+        assert_arrays_eq!(mask.into_array(), BoolArray::from_iter(expected), &mut ctx);
+    }
+
+    #[rstest]
+    #[case::equals_value_not_in_batch(eq(root(), lit(99i32)), [true])]
+    #[case::equals_value_in_batch(eq(root(), lit(5i32)), [false])]
+    #[case::gt_eq_not_supported_by_bloom(gt_eq(root(), lit(4i32)), [false])]
+    #[case::null_never_prunes(
+        gt_eq(root(), lit(Scalar::null(DType::Primitive(PType::I32, Nullability::Nullable)))),
+        [false]
+    )]
+    fn test_zone_map_prunes_with_bloom_filter_i32(
+        #[case] expr: Expression,
+        #[case] expected: [bool; 1],
+    ) -> VortexResult<()> {
+        let dtype = DType::Primitive(PType::I32, Nullability::Nullable);
+        let batch = PrimitiveArray::new(buffer![5i32, 6i32, 7i32], Validity::AllValid).into_array();
+        let zone_map = build_bloom_zone_map(dtype.clone(), batch);
+        assert_prune(&zone_map, &dtype, expr, expected);
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::equals_value_not_in_batch(eq(root(), lit("zz")), [true])]
+    #[case::equals_value_in_batch(eq(root(), lit("london")), [false])]
+    fn test_zone_map_prunes_with_bloom_filter_varbin(
+        #[case] expr: Expression,
+        #[case] expected: [bool; 1],
+    ) -> VortexResult<()> {
+        let dtype = DType::Utf8(Nullability::NonNullable);
+        let batch = VarBinArray::from_iter(
+            [Some("london"), Some("hamburg"), Some("newyork")],
+            dtype.clone(),
+        )
+        .into_array();
+        let zone_map = build_bloom_zone_map(dtype.clone(), batch);
+        assert_prune(&zone_map, &dtype, expr, expected);
         Ok(())
     }
 }

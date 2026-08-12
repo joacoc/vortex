@@ -11261,6 +11261,7 @@ dependencies = [
  "termtree",
  "tokio",
  "tracing",
+ "twox-hash",
  "uuid",
  "vortex-array",
  "vortex-arrow",

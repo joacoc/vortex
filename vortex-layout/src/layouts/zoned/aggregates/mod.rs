@@ -20,9 +20,6 @@ use vortex_session::VortexSession;
 pub(in crate::layouts::zoned) mod bloom_filter;
 mod min_max;
 
-pub(in crate::layouts::zoned) use bloom_filter::BloomFilter;
-pub(in crate::layouts::zoned) use bloom_filter::bloom_contains;
-pub(in crate::layouts::zoned) use bloom_filter::i64_value;
 use min_max::min_max_aggregate_fns;
 
 pub(super) fn default_zoned_aggregate_fns(
@@ -55,7 +52,7 @@ mod tests {
     use vortex_array::extension::datetime::TimeUnit;
     use vortex_array::extension::datetime::Timestamp;
 
-    use super::BloomFilter;
+    use super::bloom_filter::BloomFilter;
     use super::bloom_filter::BloomOptions;
     use super::default_zoned_aggregate_fns;
 
