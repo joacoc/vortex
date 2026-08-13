@@ -17,6 +17,7 @@ use vortex_array::aggregate_fn::AggregateFnVTable;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::Nullability;
 use vortex_array::scalar::Scalar;
+use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure_eq;
 use vortex_error::vortex_err;
@@ -29,6 +30,7 @@ mod partial;
 pub(in crate::layouts::zoned) mod constant;
 pub use partial::BloomPartial;
 
+use crate::layouts::zoned::aggregates::bloom_filter::partial::BLOCK_SIZE;
 use crate::layouts::zoned::skip_index::bloom::is_bloom_valid_dtype;
 
 // 1. (joacoc) Opted for blocks_count as a simpler way to tune
@@ -82,7 +84,8 @@ const DEFAULT_BLOCKS_COUNT: usize = 256;
 impl Default for BloomOptions {
     fn default() -> Self {
         Self {
-            blocks_count: NonZeroUsize::new(DEFAULT_BLOCKS_COUNT).expect("valid blocks size"),
+            blocks_count: NonZeroUsize::new(DEFAULT_BLOCKS_COUNT)
+                .vortex_expect("valid blocks size"),
         }
     }
 }
@@ -184,7 +187,7 @@ impl AggregateFnVTable for BloomFilter {
     ///
     /// Basically turns each block into a single byte sequence.
     fn to_scalar(&self, partial: &Self::Partial) -> VortexResult<Scalar> {
-        let mut bytes = Vec::with_capacity(partial.blocks.len() * 8 * size_of::<u32>());
+        let mut bytes = Vec::with_capacity(partial.blocks.len() * BLOCK_SIZE);
         bytes.extend(
             partial
                 .blocks
@@ -239,6 +242,7 @@ pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
     use vortex_error::vortex_ensure;
 
     use super::*;
+    use crate::layouts::zoned::aggregates::bloom_filter::partial::BLOCK_SIZE;
 
     pub fn setup() -> VortexResult<ExecutionCtx> {
         let session = vortex_array::array_session();
@@ -255,10 +259,7 @@ pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
 
     pub fn extract_bloom_blocks(state: &Scalar) -> VortexResult<Vec<[u32; 8]>> {
         let bytes = state.as_binary().value().expect("bloom state is non-null");
-        vortex_ensure!(
-            bytes.len() % (8 * size_of::<u32>()) == 0,
-            "invalid bloom state length"
-        );
+        vortex_ensure!(bytes.len() % BLOCK_SIZE == 0, "invalid bloom state length");
         let mut blocks = Vec::with_capacity(bytes.len() / 32);
         for block_bytes in bytes.chunks_exact(32) {
             let mut block = [0u32; 8];

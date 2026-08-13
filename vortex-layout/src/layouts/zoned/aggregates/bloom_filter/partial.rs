@@ -21,7 +21,7 @@ use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
 
 /// Block size in bits (8 * 4 = 32 bits)
-const BLOCK_SIZE: usize = 8 * size_of::<u32>();
+pub(super) const BLOCK_SIZE: usize = 8 * size_of::<u32>();
 
 /// Represents a Split block Bloom Filter filter for a single layout zone.
 pub struct BloomPartial {
@@ -251,12 +251,15 @@ impl TryFrom<&[u8]> for BloomPartial {
             .chunks_exact(BLOCK_SIZE)
             .map(|chunk| {
                 let mut block = [0u32; 8];
-                for (word, wb) in block.iter_mut().zip(chunk.chunks_exact(4)) {
-                    *word = u32::from_le_bytes(wb.try_into().unwrap());
+                for (lane, lane_bytes) in block.iter_mut().zip(chunk.chunks_exact(4)) {
+                    *lane = u32::from_le_bytes(lane_bytes.try_into().map_err(|_| {
+                        vortex_err!("invalid bloom filter word length: {}", lane_bytes.len())
+                    })?);
                 }
-                block
+                Ok(block)
             })
-            .collect();
+            .collect::<VortexResult<Vec<_>>>()?;
+
         Ok(BloomPartial { blocks })
     }
 }
