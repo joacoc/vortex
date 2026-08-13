@@ -170,61 +170,75 @@ mod tests {
         Ok(())
     }
 
+    /// The following three test will check if the validity cases
+    /// are correctly implemented for the three branches.
     #[rstest]
     #[case(&[10i8, 20, 30, 40, 50])]
-    fn validity<T>(#[case] present: &[T]) -> VortexResult<()>
+    fn validity_all_true<T>(#[case] present: &[T]) -> VortexResult<()>
     where
         T: Copy + NativePType + Into<PValue>,
     {
-        {
-            let ctx = setup()?;
-            let all_valid = PrimitiveArray::from_option_iter(present.iter().map(|&v| Some(v)));
-            let bloom_filter = build_filter(
-                all_valid.into_array(),
-                DType::Primitive(T::PTYPE, Nullability::Nullable),
-                ctx,
-            )?;
-            for &v in present {
+        let ctx = setup()?;
+        let all_valid = PrimitiveArray::from_option_iter(present.iter().map(|&v| Some(v)));
+        let bloom_filter = build_filter(
+            all_valid.into_array(),
+            DType::Primitive(T::PTYPE, Nullability::Nullable),
+            ctx,
+        )?;
+
+        for &v in present {
+            let scalar = Scalar::primitive(v, Nullability::Nullable);
+            assert!(bloom_filter.contains_valid_scalar(&scalar)?);
+        }
+
+        Ok(())
+    }
+
+    #[rstest]
+    #[case(&[10i8, 20, 30, 40, 50])]
+    fn validity_all_false<T>(#[case] present: &[T]) -> VortexResult<()>
+    where
+        T: Copy + NativePType + Into<PValue>,
+    {
+        let ctx = setup()?;
+        let all_invalid = PrimitiveArray::from_option_iter(present.iter().map(|_| None::<T>));
+        let bloom_filter = build_filter(
+            all_invalid.into_array(),
+            DType::Primitive(T::PTYPE, Nullability::Nullable),
+            ctx,
+        )?;
+
+        for &v in present {
+            let scalar = Scalar::primitive(v, Nullability::Nullable);
+            assert!(!bloom_filter.contains_valid_scalar(&scalar)?);
+        }
+
+        Ok(())
+    }
+
+    #[rstest]
+    #[case(&[10i8, 20, 30, 40, 50])]
+    fn validity_mixed<T>(#[case] present: &[T]) -> VortexResult<()>
+    where
+        T: Copy + NativePType + Into<PValue>,
+    {
+        let ctx = setup()?;
+        let mixed: Vec<Option<T>> = present
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| if i % 2 == 0 { Some(v) } else { None })
+            .collect();
+
+        let bloom_filter = build_filter(
+            PrimitiveArray::from_option_iter(mixed).into_array(),
+            DType::Primitive(T::PTYPE, Nullability::Nullable),
+            ctx,
+        )?;
+
+        for (i, &v) in present.iter().enumerate() {
+            if i % 2 == 0 {
                 let scalar = Scalar::primitive(v, Nullability::Nullable);
                 assert!(bloom_filter.contains_valid_scalar(&scalar)?);
-            }
-        }
-
-        // Mask::AllFalse: every position null. Nothing should ever be found — including the
-        // `T::default()` filler that `from_option_iter` writes into null slots internally.
-        {
-            let ctx = setup()?;
-            let all_invalid = PrimitiveArray::from_option_iter(present.iter().map(|_| None::<T>));
-            let bloom_filter = build_filter(
-                all_invalid.into_array(),
-                DType::Primitive(T::PTYPE, Nullability::Nullable),
-                ctx,
-            )?;
-            for &v in present {
-                let scalar = Scalar::primitive(v, Nullability::Nullable);
-                assert!(!bloom_filter.contains_valid_scalar(&scalar)?);
-            }
-        }
-
-        // Mask::Values: alternating valid/null. Only the valid positions should be members,
-        // and the default filler at null slots must not leak through as a false member.
-        {
-            let ctx = setup()?;
-            let mixed: Vec<Option<T>> = present
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| if i % 2 == 0 { Some(v) } else { None })
-                .collect();
-            let bloom_filter = build_filter(
-                PrimitiveArray::from_option_iter(mixed).into_array(),
-                DType::Primitive(T::PTYPE, Nullability::Nullable),
-                ctx,
-            )?;
-            for (i, &v) in present.iter().enumerate() {
-                if i % 2 == 0 {
-                    let scalar = Scalar::primitive(v, Nullability::Nullable);
-                    assert!(bloom_filter.contains_valid_scalar(&scalar)?);
-                }
             }
         }
 

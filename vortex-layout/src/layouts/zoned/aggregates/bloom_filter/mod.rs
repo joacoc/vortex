@@ -363,16 +363,11 @@ pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
         );
 
         for i in 0..100i64 {
-            let hash = partial.hash(i);
-            assert!(partial.find_hash(hash), "value {i} missing after merge");
+            assert!(partial.contains(i), "value {i} missing after merge");
         }
 
         for i in 101..200i64 {
-            let hash = partial.hash(i);
-            assert!(
-                !partial.find_hash(hash),
-                "value {i} shouldn't be present after"
-            );
+            assert!(!partial.contains(i), "value {i} shouldn't be present after");
         }
 
         Ok(())

@@ -109,6 +109,7 @@ mod tests {
             bloom_filter.contains_valid_scalar(&Scalar::bool(false, nullability))?,
             expect_false
         );
+
         Ok(())
     }
 }

@@ -16,6 +16,7 @@ pub(super) fn accumulate_extension(
 ) -> VortexResult<()> {
     let storage = array.storage_array().clone();
     let canonical = storage.execute::<Canonical>(ctx)?;
+
     super::accumulate_canonical(&canonical, partial, ctx)
 }
 

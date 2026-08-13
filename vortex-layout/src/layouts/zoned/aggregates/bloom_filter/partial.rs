@@ -1,4 +1,4 @@
-//! Split block Bloom filters implementation for vortex.
+//! Split block Bloom filters (SBBF) implementation for vortex.
 //!
 //! [Split block Bloom filters]: https://arxiv.org/pdf/2101.01719
 
@@ -9,16 +9,33 @@ use std::hash::Hash;
 use std::hash::Hasher;
 
 use twox_hash::XxHash3_64;
+use vortex_array::dtype::DType;
+use vortex_array::dtype::PType;
+use vortex_array::match_each_float_ptype;
+use vortex_array::match_each_integer_ptype;
+use vortex_array::scalar::DecimalValue;
+use vortex_array::scalar::Scalar;
+use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
+use vortex_error::vortex_err;
 
+/// Block size in bits (8 * 4 = 32 bits)
 const BLOCK_SIZE: usize = 8 * size_of::<u32>();
 
+/// Represents a Split block Bloom Filter filter for a single layout zone.
 pub struct BloomPartial {
     pub(super) blocks: Vec<[u32; 8]>,
 }
 
+/// The following Split block Bloom filter (SBBF) implementation
+/// is a translation of the original paper's names and values,
+/// with slight changes to let the Rust compiler generate
+/// optimized, vectorized code for `make_mask`, `add_hash`, and `find_hash`.
 impl BloomPartial {
+    /// Returns the blocks len.
+    ///
+    /// Matches [BloomOptions::blocks_count]
     #[inline]
     pub fn len(&self) -> usize {
         self.blocks.len()
@@ -34,12 +51,12 @@ impl BloomPartial {
     }
 
     #[inline]
-    pub(super) fn insert_hash(&mut self, hash: u64) {
+    fn insert_hash(&mut self, hash: u64) {
         self.add_hash(hash);
     }
 
     #[inline]
-    pub(super) fn hash<T>(&self, value: T) -> u64
+    fn hash<T>(&self, value: T) -> u64
     where
         T: Hash,
     {
@@ -50,10 +67,9 @@ impl BloomPartial {
         hasher.finish()
     }
 
-    /// Hash should be u64 or u32?
     fn add_hash(&mut self, hash: u64) {
         let idx = self.block_index(hash, self.blocks.len()) as usize;
-        // Block idx already consumed the hash,
+
         let mask = self.make_mask(hash as u32);
         for i in 0..8 {
             self.blocks[idx][i] |= mask[i];
@@ -61,7 +77,7 @@ impl BloomPartial {
     }
 
     /// Checks whether a hash is (probably) present in the filter.
-    pub(super) fn find_hash(&self, hash: u64) -> bool {
+    fn find_hash(&self, hash: u64) -> bool {
         let idx = self.block_index(hash, self.blocks.len()) as usize;
         let mask = self.make_mask(hash as u32);
 
@@ -76,9 +92,6 @@ impl BloomPartial {
 
     /// Takes a hash value and creates a mask with one bit set in each 32-bit lane.
     /// These are the bits to set or check when accessing the block.
-    ///
-    /// The following code is SIMD friendly and will get vectorized
-    /// by the compiler automatically (for releases).
     fn make_mask(&self, hash: u32) -> [u32; 8] {
         let mut out = [0u32; 8];
 
@@ -103,6 +116,115 @@ impl BloomPartial {
     #[inline]
     fn block_index(&self, hash: u64, blocks_count: usize) -> u64 {
         ((hash >> 32) * (blocks_count as u64)) >> 32
+    }
+}
+
+/// The following implementation provides a simpler access for scalars.
+impl BloomPartial {
+    /// Returns the hash of the scalar's underlying value.
+    /// Returns an error if the [Scalar] is invalid or its [DType] is unsupported.
+    ///
+    /// For example, `Scalar(Primitive(I32(54)))` is hashed as `hash(54)`.
+    pub(in crate::layouts::zoned) fn hash_valid_scalar(
+        &self,
+        scalar: &Scalar,
+    ) -> VortexResult<u64> {
+        if scalar.is_null() {
+            return Err(vortex_err!("cannot hash invalid scalars in bloom filter"));
+        }
+
+        Ok(match scalar.dtype() {
+            DType::Extension(_) => {
+                self.hash_valid_scalar(&scalar.as_extension().to_storage_scalar())?
+            }
+            DType::Bool(_) => self.hash(
+                scalar
+                    .as_bool()
+                    .value()
+                    .vortex_expect("non-null boolean value"),
+            ),
+            DType::Primitive(ptype, _) => match ptype {
+                PType::F16 | PType::F32 | PType::F64 => {
+                    match_each_float_ptype!(ptype, |T| {
+                        let value = scalar
+                            .as_primitive()
+                            .typed_value::<T>()
+                            .vortex_expect("non-null primitive value");
+                        self.hash(value.to_bits())
+                    })
+                }
+                _ => match_each_integer_ptype!(ptype, |T| {
+                    let value = scalar
+                        .as_primitive()
+                        .typed_value::<T>()
+                        .vortex_expect("non-null primitive value");
+                    self.hash(value)
+                }),
+            },
+            DType::Decimal(..) => {
+                let decimal = scalar
+                    .as_decimal()
+                    .decimal_value()
+                    .vortex_expect("non-null decimal value");
+                match decimal {
+                    DecimalValue::I8(v) => self.hash(v),
+                    DecimalValue::I16(v) => self.hash(v),
+                    DecimalValue::I32(v) => self.hash(v),
+                    DecimalValue::I64(v) => self.hash(v),
+                    DecimalValue::I128(v) => self.hash(v),
+                    DecimalValue::I256(v) => self.hash(v),
+                }
+            }
+            DType::Utf8(_) => {
+                let buffer = scalar
+                    .as_utf8()
+                    .value()
+                    .vortex_expect("non-null utf8 value");
+                self.hash(buffer.as_bytes())
+            }
+            DType::Binary(_) => {
+                let buffer = scalar
+                    .as_binary()
+                    .value()
+                    .vortex_expect("non-null binary value");
+                self.hash(buffer.as_slice())
+            }
+            other => {
+                return Err(vortex_err!("bloom filter does not support dtype {other}"));
+            }
+        })
+    }
+
+    /// Returns true if the underlying value of a [Scalar] may be present.
+    /// Returns an error if the [Scalar] is invalid or its [DType] is unsupported.
+    pub(in crate::layouts::zoned) fn contains_valid_scalar(
+        &self,
+        scalar: &Scalar,
+    ) -> VortexResult<bool> {
+        let hash = self.hash_valid_scalar(scalar)?;
+        Ok(self.find_hash(hash))
+    }
+
+    /// Inserts the underlying value of a [Scalar] if it is valid.
+    /// Returns an error if the [Scalar] is invalid or its [DType] is unsupported.
+    pub(in crate::layouts::zoned) fn insert_valid_scalar(
+        &mut self,
+        scalar: &Scalar,
+    ) -> VortexResult<()> {
+        let hash = self.hash_valid_scalar(scalar)?;
+        Ok(self.insert_hash(hash))
+    }
+}
+
+#[cfg(test)]
+impl BloomPartial {
+    #[inline]
+    pub(super) fn contains<T>(&self, value: T) -> bool
+    where
+        T: Hash,
+    {
+        let hash = self.hash(value);
+        self.find_hash(hash)
     }
 }
 
