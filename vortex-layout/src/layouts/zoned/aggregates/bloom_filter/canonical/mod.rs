@@ -39,7 +39,8 @@ pub(super) fn accumulate_canonical(
         | Canonical::List(_)
         | Canonical::FixedSizeList(_)
         | Canonical::Variant(_)
-        | Canonical::Union(_) => {
+        | Canonical::Union(_)
+        | Canonical::Map(_) => {
             vortex_bail!(
                 "Unsupported canonical type for bloom filter: {}",
                 canonical.dtype()

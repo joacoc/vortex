@@ -59,7 +59,6 @@ pub struct WriteStrategyBuilder {
     row_block_size: usize,
     data_block_target_bytes: Option<u64>,
     field_writers: HashMap<FieldPath, Arc<dyn LayoutStrategy>>,
-    field_zoned_options: HashMap<FieldPath, ZonedLayoutOptions>,
     allow_encodings: Option<HashSet<ArrayId>>,
     flat_strategy: Option<Arc<dyn LayoutStrategy>>,
     probe_compressor: Option<Arc<dyn CompressorPlugin>>,
@@ -79,7 +78,6 @@ impl Default for WriteStrategyBuilder {
             data_block_target_bytes: Some(ONE_MEG),
             field_writers: HashMap::new(),
             allow_encodings: None,
-            field_zoned_options: HashMap::new(),
             flat_strategy: None,
             probe_compressor: None,
             use_list_layout: use_experimental_list_layout(),
@@ -130,21 +128,7 @@ impl WriteStrategyBuilder {
         self
     }
 
-    /// Override only the zoned-statistics options for a field while retaining the default
-    /// repartitioning, dictionary, compression, buffering, and flat-layout pipeline.
-    ///
-    /// This can attach custom per-zone aggregates without changing the physical data strategy for
-    /// the field.
-    pub fn with_field_zoned_options(
-        mut self,
-        field: impl Into<FieldPath>,
-        options: ZonedLayoutOptions,
-    ) -> Self {
-        self.field_zoned_options.insert(field.into(), options);
-        self
-    }
-
-    /// Override the allowed array encodings for normalization.
+    /// Override the allowed array encodings for file writing.
     ///
     /// The configured flat leaf strategy is wrapped in a [`LayoutStrategyEncodingValidator`]
     /// that recursively checks every chunk before passing it to the leaf writer. [`build`](Self::build)
@@ -191,7 +175,7 @@ impl WriteStrategyBuilder {
 
     /// Builds the canonical [`LayoutStrategy`] implementation, with the configured overrides
     /// applied.
-    pub fn build(mut self) -> Arc<dyn LayoutStrategy> {
+    pub fn build(self) -> Arc<dyn LayoutStrategy> {
         let flat: Arc<dyn LayoutStrategy> = if let Some(flat) = self.flat_strategy {
             flat
         } else {
@@ -277,40 +261,36 @@ impl WriteStrategyBuilder {
 
         let row_block_size = NonZeroUsize::new(self.row_block_size).vortex_expect("must be non 0");
 
-        let column_writer = |options: ZonedLayoutOptions| -> Arc<dyn LayoutStrategy> {
-            // 2. calculate stats for each row group
-            let stats =
-                ZonedStrategy::new(dict.clone(), compress_then_flat.clone(), options.clone());
+        // 2. calculate stats for each row group
+        let stats = ZonedStrategy::new(
+            dict,
+            compress_then_flat.clone(),
+            ZonedLayoutOptions {
+                block_size: row_block_size,
+                ..Default::default()
+            },
+        );
 
-            // 1. repartition each column to fixed row counts
-            Arc::new(RepartitionStrategy::new(
-                stats,
-                RepartitionWriterOptions {
-                    // No minimum block size in bytes
-                    block_size_minimum: 0,
-                    block_len_multiple: options.block_size.get(),
-                    block_size_target: None,
-                    canonicalize: false,
-                },
-            ))
-        };
-        let repartition = column_writer(ZonedLayoutOptions {
-            block_size: row_block_size,
-            ..Default::default()
-        });
-
-        for (field, options) in self.field_zoned_options {
-            self.field_writers
-                .entry(field)
-                .or_insert_with(|| column_writer(options));
-        }
+        // 1. repartition each column to fixed row counts
+        let repartition = RepartitionStrategy::new(
+            stats,
+            RepartitionWriterOptions {
+                // No minimum block size in bytes
+                block_size_minimum: 0,
+                // Always repartition into 8K row blocks
+                block_len_multiple: self.row_block_size,
+                block_size_target: None,
+                canonicalize: false,
+            },
+        );
 
         // 0. start with splitting columns
         let validity_strategy = CollectStrategy::new(compress_then_flat.clone());
 
         // Take any field overrides from the builder and apply them to the final strategy.
-        let mut table_strategy = TableStrategy::new(Arc::new(validity_strategy), repartition)
-            .with_field_writers(self.field_writers);
+        let mut table_strategy =
+            TableStrategy::new(Arc::new(validity_strategy), Arc::new(repartition))
+                .with_field_writers(self.field_writers);
 
         if self.use_list_layout {
             // We need a closure here to enable recursive application of list layout.

@@ -31,15 +31,6 @@ pub(in crate::layouts::zoned) mod constant;
 pub use partial::BloomPartial;
 
 use crate::layouts::zoned::aggregates::bloom_filter::partial::BLOCK_SIZE;
-use crate::layouts::zoned::skip_index::bloom::is_bloom_valid_dtype;
-
-// 1. (joacoc) Opted for blocks_count as a simpler way to tune
-// the Bloom filter, even though there are other ways.
-// 2. (joacoc) I think the optimal could be using statistics, similar
-// to how vortex encoder selection works.
-// 3. (joacoc) In case that the tune/options stays as is,
-// a guide on how to select the number of blocks
-// would be great.
 
 /// Bloom-filter tuning persisted as aggregate metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -231,8 +222,24 @@ impl AggregateFnVTable for BloomFilter {
     }
 }
 
-// The following functions are utils/useful for tests in canonical and constants.
+/// Returns true if the type is valid for the bloom index to acc/contain.
+///
+/// This is defined by the available implementations in
+/// [crate::layouts::zoned::aggregates::bloom::constant] and
+/// [crate::layouts::zoned::aggregates::bloom::canonical]
+fn is_bloom_valid_dtype(dtype: &DType) -> bool {
+    match dtype {
+        DType::Extension(ext) => is_bloom_valid_dtype(ext.storage_dtype()),
+        DType::Bool(_)
+        | DType::Primitive(..)
+        | DType::Decimal(..)
+        | DType::Utf8(_)
+        | DType::Binary(_) => true,
+        _ => false,
+    }
+}
 
+// The following functions are utils/useful for tests in canonical and constants.
 #[cfg(test)]
 pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
     use vortex_array::IntoArray;
