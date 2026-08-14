@@ -28,7 +28,7 @@ pub struct BloomPartial {
     pub(super) blocks: Vec<[u32; 8]>,
 }
 
-/// The following Split block Bloom filter (SBBF) implementation
+/// The following split block Bloom filter implementation
 /// is a translation of the original paper's names and values,
 /// with slight changes to let the Rust compiler generate
 /// optimized, vectorized code for `make_mask`, `add_hash`, and `find_hash`.
