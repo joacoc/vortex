@@ -28,10 +28,12 @@ pub(super) fn accumulate_bool(
     };
 
     if true_count > 0 {
-        partial.insert(true);
+        // True present
+        partial.insert([0x1]);
     }
     if true_count < valid_count {
-        partial.insert(false);
+        // False present
+        partial.insert([0x0]);
     }
 
     Ok(())

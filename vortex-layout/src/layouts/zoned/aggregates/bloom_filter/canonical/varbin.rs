@@ -42,7 +42,7 @@ pub(super) fn accumulate_varbin(
                 .iter()
                 .for_each(|view| process_view(view, &buffers));
         }
-        Mask::AllFalse(_) => todo!(),
+        Mask::AllFalse(_) => {}
         Mask::Values(mask_values) => {
             let views_iter = array.views().iter();
             let buffers = array

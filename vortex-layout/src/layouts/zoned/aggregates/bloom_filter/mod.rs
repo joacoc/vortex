@@ -30,8 +30,6 @@ mod partial;
 pub(in crate::layouts::zoned) mod constant;
 pub use partial::BloomPartial;
 
-use crate::layouts::zoned::aggregates::bloom_filter::partial::BLOCK_SIZE;
-
 /// Bloom-filter tuning persisted as aggregate metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BloomOptions {
@@ -141,9 +139,7 @@ impl AggregateFnVTable for BloomFilter {
 
     /// Returns an empty Bloom filter with all blocks zero-initialized.
     fn empty_partial(&self, options: &Self::Options, _: &DType) -> VortexResult<Self::Partial> {
-        Ok(BloomPartial {
-            blocks: vec![[0u32; 8]; options.blocks_count.get()],
-        })
+        Ok(BloomPartial::from(options))
     }
 
     // Combination happens by doing an OR between both filters bits
@@ -160,16 +156,12 @@ impl AggregateFnVTable for BloomFilter {
         let other = BloomPartial::try_from(bytes.as_slice())?;
 
         vortex_ensure_eq!(
-            partial.blocks.len(),
-            other.blocks.len(),
+            partial.len(),
+            other.len(),
             "bloom partial block count mismatch — partials built with different blocks_count"
         );
 
-        for (dst, src) in partial.blocks.iter_mut().zip(other.blocks.iter()) {
-            for i in 0..8 {
-                dst[i] |= src[i];
-            }
-        }
+        partial.combine_with_other(other);
 
         Ok(())
     }
@@ -178,24 +170,16 @@ impl AggregateFnVTable for BloomFilter {
     ///
     /// Basically turns each block into a single byte sequence.
     fn to_scalar(&self, partial: &Self::Partial) -> VortexResult<Scalar> {
-        let mut bytes = Vec::with_capacity(partial.blocks.len() * BLOCK_SIZE);
-        bytes.extend(
-            partial
-                .blocks
-                .iter()
-                .flatten()
-                .flat_map(|block_seq| block_seq.to_le_bytes()),
-        );
-
+        let bytes: Vec<u8> = partial.into();
         Ok(Scalar::binary(bytes, Nullability::NonNullable))
     }
 
     fn reset(&self, partial: &mut Self::Partial) {
-        partial.blocks.fill([0; 8]);
+        partial.reset();
     }
 
     fn is_saturated(&self, partial: &Self::Partial) -> bool {
-        partial.blocks.iter().all(|byte| *byte == [u32::MAX; 8])
+        partial.is_saturated()
     }
 
     fn accumulate(
@@ -341,7 +325,7 @@ pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
             &DType::Binary(Nullability::NonNullable),
         )?;
         for i in 0..50i64 {
-            partial.insert(i);
+            partial.insert(i.to_le_bytes());
         }
 
         let mut secondary_partial = BloomFilter.empty_partial(
@@ -349,7 +333,7 @@ pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
             &DType::Binary(Nullability::NonNullable),
         )?;
         for i in 50..100i64 {
-            secondary_partial.insert(i);
+            secondary_partial.insert(i.to_le_bytes());
         }
 
         // The following expected works because seed is equal for all.
@@ -359,23 +343,29 @@ pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
             &DType::Binary(Nullability::NonNullable),
         )?;
         for i in 0..100i64 {
-            expected.insert(i);
+            expected.insert(i.to_le_bytes());
         }
 
         let secondary_partial_as_scalar = BloomFilter.to_scalar(&secondary_partial)?;
         BloomFilter.combine_partials(&mut partial, secondary_partial_as_scalar)?;
 
-        assert_eq!(
-            partial.blocks, expected.blocks,
+        assert!(
+            partial == expected,
             "merging via combine_partials should equal a single filter built from the union of inputs"
         );
 
         for i in 0..100i64 {
-            assert!(partial.contains(i), "value {i} missing after merge");
+            assert!(
+                partial.contains(i.to_le_bytes()),
+                "value {i} missing after merge"
+            );
         }
 
         for i in 101..200i64 {
-            assert!(!partial.contains(i), "value {i} shouldn't be present after");
+            assert!(
+                !partial.contains(i.to_le_bytes()),
+                "value {i} shouldn't be present after"
+            );
         }
 
         Ok(())

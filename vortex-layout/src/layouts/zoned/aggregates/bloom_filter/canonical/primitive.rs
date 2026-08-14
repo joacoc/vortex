@@ -30,14 +30,14 @@ pub(super) fn accumulate_primitive(
                 match array.validity()?.execute_mask(slice.len(), ctx)? {
                     Mask::AllTrue(_) => {
                         for &value in slice {
-                            partial.insert(value.to_bits());
+                            partial.insert_primitive(value);
                         }
                     }
                     Mask::AllFalse(_) => {}
                     Mask::Values(mask_values) => {
                         for &(start, end) in mask_values.slices() {
                             for &value in &slice[start..end] {
-                                partial.insert(value.to_bits());
+                                partial.insert_primitive(value);
                             }
                         }
                     }
@@ -80,14 +80,14 @@ pub(super) fn accumulate_primitive(
                 match array.validity()?.execute_mask(slice.len(), ctx)? {
                     Mask::AllTrue(_) => {
                         for &value in slice {
-                            partial.insert(value);
+                            partial.insert_primitive(value);
                         }
                     }
                     Mask::AllFalse(_) => {}
                     Mask::Values(mask_values) => {
                         for &(start, end) in mask_values.slices() {
                             for &value in &slice[start..end] {
-                                partial.insert(value);
+                                partial.insert_primitive(value);
                             }
                         }
                     }

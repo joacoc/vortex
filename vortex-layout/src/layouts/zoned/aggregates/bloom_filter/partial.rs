@@ -5,12 +5,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-use std::hash::Hash;
-use std::hash::Hasher;
-
 use twox_hash::XxHash3_64;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::PType;
+use vortex_array::dtype::ToBytes;
 use vortex_array::match_each_float_ptype;
 use vortex_array::match_each_integer_ptype;
 use vortex_array::scalar::DecimalValue;
@@ -20,12 +18,14 @@ use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
 
-/// Block size in bits (8 * 4 = 32 bits)
+use crate::layouts::zoned::aggregates::bloom_filter::BloomOptions;
+
+/// Block size (32 bytes [256 bits])
 pub(super) const BLOCK_SIZE: usize = 8 * size_of::<u32>();
 
 /// Represents a Split block Bloom Filter filter for a single layout zone.
 pub struct BloomPartial {
-    pub(super) blocks: Vec<[u32; 8]>,
+    blocks: Vec<[u32; 8]>,
 }
 
 /// The following split block Bloom filter implementation
@@ -44,7 +44,7 @@ impl BloomPartial {
     #[inline]
     pub(super) fn insert<T>(&mut self, value: T)
     where
-        T: Hash,
+        T: AsRef<[u8]>,
     {
         let hash = self.hash(value);
         self.insert_hash(hash);
@@ -58,19 +58,18 @@ impl BloomPartial {
     #[inline]
     fn hash<T>(&self, value: T) -> u64
     where
-        T: Hash,
+        T: AsRef<[u8]>,
     {
         // > Since the seed is optional, it can be 0.
         // Ref: https://github.com/Cyan4973/xxHash/blob/v0.8.3/doc/xxhash_spec.md#step-1-initialize-internal-accumulators
-        let mut hasher = XxHash3_64::with_seed(0);
-        value.hash(&mut hasher);
-        hasher.finish()
+        XxHash3_64::oneshot_with_seed(0, value.as_ref())
     }
 
     fn add_hash(&mut self, hash: u64) {
         let idx = self.block_index(hash, self.blocks.len()) as usize;
-
         let mask = self.make_mask(hash as u32);
+
+        // or the mask into the existing bucket
         for i in 0..8 {
             self.blocks[idx][i] |= mask[i];
         }
@@ -80,14 +79,17 @@ impl BloomPartial {
     fn find_hash(&self, hash: u64) -> bool {
         let idx = self.block_index(hash, self.blocks.len()) as usize;
         let mask = self.make_mask(hash as u32);
+        let mut missing = 0u32;
+        let block = &self.blocks[idx];
 
+        // (joacoc) the original solution uses _mm256_testc_si256
+        // checks if all the bits in mask are also set in *block. Scalar
+        // equivalent: (~block & mask) == 0
         for i in 0..8 {
-            if self.blocks[idx][i] & mask[i] != mask[i] {
-                return false;
-            }
+            missing |= !block[i] & mask[i];
         }
 
-        true
+        missing == 0
     }
 
     /// Takes a hash value and creates a mask with one bit set in each 32-bit lane.
@@ -119,6 +121,28 @@ impl BloomPartial {
     }
 }
 
+/// Practical implementation to avoid having to share blocks
+impl BloomPartial {
+    #[inline]
+    pub(super) fn reset(&mut self) {
+        self.blocks.fill([0; 8]);
+    }
+
+    #[inline]
+    pub(super) fn is_saturated(&self) -> bool {
+        self.blocks.iter().all(|byte| *byte == [u32::MAX; 8])
+    }
+
+    #[inline]
+    pub(super) fn combine_with_other(&mut self, other: BloomPartial) {
+        for (dst, src) in self.blocks.iter_mut().zip(other.blocks.iter()) {
+            for i in 0..8 {
+                dst[i] |= src[i];
+            }
+        }
+    }
+}
+
 /// The following implementation provides a simpler access for scalars.
 impl BloomPartial {
     /// Returns the hash of the scalar's underlying value.
@@ -137,12 +161,12 @@ impl BloomPartial {
             DType::Extension(_) => {
                 self.hash_valid_scalar(&scalar.as_extension().to_storage_scalar())?
             }
-            DType::Bool(_) => self.hash(
+            DType::Bool(_) => self.hash([u8::from(
                 scalar
                     .as_bool()
                     .value()
                     .vortex_expect("non-null boolean value"),
-            ),
+            )]),
             DType::Primitive(ptype, _) => match ptype {
                 PType::F16 | PType::F32 | PType::F64 => {
                     match_each_float_ptype!(ptype, |T| {
@@ -150,7 +174,7 @@ impl BloomPartial {
                             .as_primitive()
                             .typed_value::<T>()
                             .vortex_expect("non-null primitive value");
-                        self.hash(value.to_bits())
+                        self.hash(value.to_le_bytes())
                     })
                 }
                 _ => match_each_integer_ptype!(ptype, |T| {
@@ -158,7 +182,7 @@ impl BloomPartial {
                         .as_primitive()
                         .typed_value::<T>()
                         .vortex_expect("non-null primitive value");
-                    self.hash(value)
+                    self.hash(value.to_le_bytes())
                 }),
             },
             DType::Decimal(..) => {
@@ -167,12 +191,12 @@ impl BloomPartial {
                     .decimal_value()
                     .vortex_expect("non-null decimal value");
                 match decimal {
-                    DecimalValue::I8(v) => self.hash(v),
-                    DecimalValue::I16(v) => self.hash(v),
-                    DecimalValue::I32(v) => self.hash(v),
-                    DecimalValue::I64(v) => self.hash(v),
-                    DecimalValue::I128(v) => self.hash(v),
-                    DecimalValue::I256(v) => self.hash(v),
+                    DecimalValue::I8(v) => self.hash(v.to_le_bytes()),
+                    DecimalValue::I16(v) => self.hash(v.to_le_bytes()),
+                    DecimalValue::I32(v) => self.hash(v.to_le_bytes()),
+                    DecimalValue::I64(v) => self.hash(v.to_le_bytes()),
+                    DecimalValue::I128(v) => self.hash(v.to_le_bytes()),
+                    DecimalValue::I256(v) => self.hash(v.to_le_bytes()),
                 }
             }
             DType::Utf8(_) => {
@@ -214,17 +238,52 @@ impl BloomPartial {
         let hash = self.hash_valid_scalar(scalar)?;
         Ok(self.insert_hash(hash))
     }
+
+    /// Given that primitives have the trait [ToBytes]
+    /// give them a better path.
+    #[inline]
+    pub(super) fn insert_primitive<T>(&mut self, value: T)
+    where
+        T: ToBytes,
+    {
+        let hash = self.hash(value.to_le_bytes());
+        self.insert_hash(hash);
+    }
 }
 
+/// Contains for generic type [T] is used only for tests,
+/// for scalars use [BloomPartial::contains_valid_scalar].
 #[cfg(test)]
 impl BloomPartial {
     #[inline]
     pub(super) fn contains<T>(&self, value: T) -> bool
     where
-        T: Hash,
+        T: AsRef<[u8]>,
     {
         let hash = self.hash(value);
         self.find_hash(hash)
+    }
+}
+
+impl Into<Vec<u8>> for &BloomPartial {
+    fn into(self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.len() * BLOCK_SIZE);
+        bytes.extend(
+            self.blocks
+                .iter()
+                .flatten()
+                .flat_map(|block_seq| block_seq.to_le_bytes()),
+        );
+
+        bytes
+    }
+}
+
+impl From<&BloomOptions> for BloomPartial {
+    fn from(options: &BloomOptions) -> Self {
+        Self {
+            blocks: vec![[0u32; 8]; options.blocks_count.get()],
+        }
     }
 }
 
@@ -261,5 +320,13 @@ impl TryFrom<&[u8]> for BloomPartial {
             .collect::<VortexResult<Vec<_>>>()?;
 
         Ok(BloomPartial { blocks })
+    }
+}
+
+/// Same as derive but keeping it separated
+/// in case in the future more properties are added.
+impl PartialEq for BloomPartial {
+    fn eq(&self, other: &Self) -> bool {
+        self.blocks == other.blocks
     }
 }

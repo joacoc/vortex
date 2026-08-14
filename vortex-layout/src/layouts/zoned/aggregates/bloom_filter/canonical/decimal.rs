@@ -21,7 +21,7 @@ pub(super) fn accumulate_decimal(
                 array
                     .buffer::<D>()
                     .iter()
-                    .for_each(|value| partial.insert(value));
+                    .for_each(|value| partial.insert(value.to_le_bytes()));
             }
             Mask::AllFalse(_) => {}
             Mask::Values(v) => {
@@ -31,7 +31,7 @@ pub(super) fn accumulate_decimal(
                     .zip(v.bit_buffer().iter())
                     .for_each(|(value, valid)| {
                         if valid {
-                            partial.insert(value)
+                            partial.insert(value.to_le_bytes())
                         }
                     });
             }
