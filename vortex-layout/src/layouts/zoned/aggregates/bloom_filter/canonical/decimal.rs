@@ -1,17 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-use vortex_array::Array;
 use vortex_array::ExecutionCtx;
-use vortex_array::arrays::Decimal;
+use vortex_array::arrays::DecimalArray;
 use vortex_array::match_each_decimal_value_type;
 use vortex_error::VortexResult;
 use vortex_mask::Mask;
 
-use crate::layouts::zoned::aggregates::bloom_filter::BloomPartial;
+use super::BloomPartial;
 
 pub(super) fn accumulate_decimal(
-    array: &Array<Decimal>,
+    array: &DecimalArray,
     partial: &mut BloomPartial,
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<()> {
@@ -85,6 +84,81 @@ mod tests {
 
         let absent_scalar = Scalar::decimal(absent.into(), decimal_dtype, Nullability::NonNullable);
         assert!(!bloom_filter.contains_valid_scalar(&absent_scalar)?);
+
+        Ok(())
+    }
+
+    /// Checks that only valid decimal values are added to the bloom filter.
+    #[rstest]
+    #[case(&[10i8, 20, 30, 40, 50])]
+    fn validity_all_true<T>(#[case] present: &[T]) -> VortexResult<()>
+    where
+        T: Copy + Into<DecimalValue> + NativeDecimalType,
+    {
+        let ctx = setup()?;
+        let decimal_dtype = DecimalDType::new(3, 0);
+        let all_valid =
+            DecimalArray::from_option_iter(present.iter().copied().map(Some), decimal_dtype);
+        let bloom_filter = build_filter(
+            all_valid.into_array(),
+            DType::Decimal(decimal_dtype, Nullability::Nullable),
+            ctx,
+        )?;
+
+        for &v in present {
+            let scalar = Scalar::decimal(v.into(), decimal_dtype, Nullability::Nullable);
+            assert!(bloom_filter.contains_valid_scalar(&scalar)?);
+        }
+
+        Ok(())
+    }
+
+    #[rstest]
+    #[case(&[10i8, 20, 30, 40, 50])]
+    fn validity_all_false<T>(#[case] present: &[T]) -> VortexResult<()>
+    where
+        T: Copy + Into<DecimalValue> + NativeDecimalType,
+    {
+        let ctx = setup()?;
+        let decimal_dtype = DecimalDType::new(3, 0);
+        let all_invalid =
+            DecimalArray::from_option_iter(present.iter().map(|_| None::<T>), decimal_dtype);
+        let bloom_filter = build_filter(
+            all_invalid.into_array(),
+            DType::Decimal(decimal_dtype, Nullability::Nullable),
+            ctx,
+        )?;
+
+        for &v in present {
+            let scalar = Scalar::decimal(v.into(), decimal_dtype, Nullability::Nullable);
+            assert!(!bloom_filter.contains_valid_scalar(&scalar)?);
+        }
+
+        Ok(())
+    }
+
+    #[rstest]
+    #[case(&[10i8, 20, 30, 40, 50])]
+    fn validity_mixed<T>(#[case] present: &[T]) -> VortexResult<()>
+    where
+        T: Copy + Into<DecimalValue> + NativeDecimalType,
+    {
+        let ctx = setup()?;
+        let decimal_dtype = DecimalDType::new(3, 0);
+        let mixed = present
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| if i % 2 == 0 { Some(v) } else { None });
+        let bloom_filter = build_filter(
+            DecimalArray::from_option_iter(mixed, decimal_dtype).into_array(),
+            DType::Decimal(decimal_dtype, Nullability::Nullable),
+            ctx,
+        )?;
+
+        for (i, &v) in present.iter().enumerate() {
+            let scalar = Scalar::decimal(v.into(), decimal_dtype, Nullability::Nullable);
+            assert_eq!(bloom_filter.contains_valid_scalar(&scalar)?, i % 2 == 0,);
+        }
 
         Ok(())
     }

@@ -1,4 +1,8 @@
-//! Split block Bloom filters (SBBF) implementation for vortex.
+//! Split block Bloom filters (SBBF) implementation for Vortex.
+//!
+//! This implementation follows the original paper, renaming `bucket` to `block`,
+//! with small changes that help the Rust compiler generate optimized, vectorized
+//! code for `make_mask`, `add_hash`, and `find_hash`.
 //!
 //! [Split block Bloom filters]: https://arxiv.org/pdf/2101.01719
 
@@ -18,7 +22,7 @@ use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
 
-use crate::layouts::zoned::aggregates::bloom_filter::BloomOptions;
+use super::BloomOptions;
 
 /// Block size (32 bytes [256 bits])
 pub(super) const BLOCK_SIZE: usize = 8 * size_of::<u32>();
@@ -28,10 +32,6 @@ pub struct BloomPartial {
     blocks: Vec<[u32; 8]>,
 }
 
-/// The following split block Bloom filter implementation
-/// is a translation of the original paper's names and values,
-/// with slight changes to let the Rust compiler generate
-/// optimized, vectorized code for `make_mask`, `add_hash`, and `find_hash`.
 impl BloomPartial {
     /// Returns the blocks len.
     ///
@@ -82,7 +82,7 @@ impl BloomPartial {
         let mut missing = 0u32;
         let block = &self.blocks[idx];
 
-        // (joacoc) the original solution uses _mm256_testc_si256
+        // The original solution uses _mm256_testc_si256
         // checks if all the bits in mask are also set in *block. Scalar
         // equivalent: (~block & mask) == 0
         for i in 0..8 {
@@ -214,7 +214,9 @@ impl BloomPartial {
                 self.hash(buffer.as_slice())
             }
             other => {
-                return Err(vortex_err!("bloom filter does not support dtype {other}"));
+                return Err(vortex_err!(
+                    "Unsupported scalar type for bloom filter: {other}"
+                ));
             }
         })
     }

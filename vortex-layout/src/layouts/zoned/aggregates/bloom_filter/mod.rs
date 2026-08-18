@@ -30,7 +30,10 @@ mod partial;
 pub(in crate::layouts::zoned) mod constant;
 pub use partial::BloomPartial;
 
-/// Bloom-filter tuning persisted as aggregate metadata.
+/// The default value is derived from the default `WriteStrategyBuilder::row_block_size`
+const DEFAULT_BLOCKS_COUNT: usize = 256;
+
+/// Bloom-filter tuning options
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BloomOptions {
     /// Number of blocks in the split block Bloom filter (SBBF).
@@ -38,22 +41,19 @@ pub struct BloomOptions {
     /// Defaults to: [DEFAULT_BLOCKS_COUNT].
     ///
     /// The filter is partitioned into 256-bit blocks. More blocks reduce the
-    /// number of distinct values assigned to each block, reducing the
-    /// false-positive rate at the cost of increased filter size.
+    /// false-positive rate at the cost of a larger filter.
     ///
     /// ### Block size and memory usage
     ///
-    /// As a reference, you can use the following table
-    /// to understand the relationship between block size and memory usage
-    /// for a **single zone**.
+    /// Approximate memory used by the filter for one zone:
     ///
-    /// | `blocks_count` |      Memory |
-    /// | --------------: | ----------: |
-    /// |               8 |   **256 B** |
-    /// |             256 |   **8 KiB** |
-    /// |            8192 | **256 KiB** |
-    /// |          65,536 |   **2 MiB** |
-    /// |       1,048,576 |  **32 MiB** |
+    /// | `blocks_count`  |      Memory | Notes   |
+    /// | --------------: | ----------: | ------- |
+    /// |               8 |   **256 B** |         |
+    /// |             256 |   **8 KiB** | Default |
+    /// |           8,192 | **256 KiB** |         |
+    /// |          65,536 |   **2 MiB** |         |
+    /// |       1,048,576 |  **32 MiB** |         |
     blocks_count: NonZeroUsize,
 }
 
@@ -66,9 +66,6 @@ impl BloomOptions {
         self.blocks_count
     }
 }
-
-/// The default value is derived from the default [WriteStrategyBuilder::row_block_size]
-const DEFAULT_BLOCKS_COUNT: usize = 256;
 
 impl Default for BloomOptions {
     fn default() -> Self {
@@ -85,12 +82,23 @@ impl Display for BloomOptions {
     }
 }
 
-/// Aggregate that stores one fixed-size Bloom block as a `Binary` scalar for every zone.
-/// The bloom filter only stores valid scalar values, and does not consider
-/// `NULL` values as part of the filter. If you need to know if a zone has null values
-/// you should use the NULL count.
+/// A Bloom filter is an approximate membership query structure.
+/// In Vortex layouts, it helps determine if a value is present in a zone or not.
 ///
-/// Empty unit struct, in accordance to [AggregateFnVTable] definition.
+/// Because membership is approximate, the filter can produce false positives.
+/// Their probability depends on the number of distinct values in the zone and
+/// the filter configuration.
+///
+/// ### Implementation
+///
+/// This implementation uses a Split block Bloom Filter (SBBF), a Bloom filter
+/// variant designed to take advantage of SIMD instructions and parallelism.
+///
+/// Refer to [BloomPartial] for the implementation code.
+///
+/// ### Notice
+///
+/// Only valid (non-null) scalar values are stored in the filter.
 #[derive(Clone, Debug)]
 pub struct BloomFilter;
 
@@ -178,6 +186,7 @@ impl AggregateFnVTable for BloomFilter {
         partial.reset();
     }
 
+    /// Returns true if all the blocks are full.
     fn is_saturated(&self, partial: &Self::Partial) -> bool {
         partial.is_saturated()
     }

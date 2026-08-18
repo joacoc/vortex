@@ -12,12 +12,13 @@ mod extension;
 mod primitive;
 mod varbin;
 
-use crate::layouts::zoned::aggregates::bloom_filter::BloomPartial;
-use crate::layouts::zoned::aggregates::bloom_filter::canonical::bool::accumulate_bool;
-use crate::layouts::zoned::aggregates::bloom_filter::canonical::decimal::accumulate_decimal;
-use crate::layouts::zoned::aggregates::bloom_filter::canonical::extension::accumulate_extension;
-use crate::layouts::zoned::aggregates::bloom_filter::canonical::primitive::accumulate_primitive;
-use crate::layouts::zoned::aggregates::bloom_filter::canonical::varbin::accumulate_varbin;
+use bool::accumulate_bool;
+use decimal::accumulate_decimal;
+use extension::accumulate_extension;
+use primitive::accumulate_primitive;
+use varbin::accumulate_varbin;
+
+use super::BloomPartial;
 
 pub(super) fn accumulate_canonical(
     canonical: &Canonical,

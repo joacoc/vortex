@@ -7,7 +7,7 @@ use vortex_array::arrays::ExtensionArray;
 use vortex_array::arrays::extension::ExtensionArrayExt;
 use vortex_error::VortexResult;
 
-use crate::layouts::zoned::aggregates::bloom_filter::BloomPartial;
+use super::BloomPartial;
 
 pub(super) fn accumulate_extension(
     array: &ExtensionArray,

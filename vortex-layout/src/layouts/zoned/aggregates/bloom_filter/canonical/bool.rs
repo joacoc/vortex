@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use std::ops::BitAnd;
+
 use vortex_array::ExecutionCtx;
 use vortex_array::arrays::BoolArray;
 use vortex_array::arrays::bool::BoolArrayExt;
 use vortex_error::VortexResult;
 use vortex_mask::AllOr;
 
-use crate::layouts::zoned::aggregates::bloom_filter::BloomPartial;
+use super::BloomPartial;
 
 /// Similar to [vortex_array::aggregate_fn::fns::min_max::accumulate_bool]
 pub(super) fn accumulate_bool(
@@ -16,15 +18,14 @@ pub(super) fn accumulate_bool(
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<()> {
     let mask = array.validity()?.execute_mask(array.len(), ctx)?;
-    let bits = array.bit_buffer_view();
 
     let (true_count, valid_count) = match mask.bit_buffer() {
         AllOr::None => return Ok(()),
-        AllOr::All => (bits.true_count() as u64, array.len() as u64),
-        AllOr::Some(validity) => {
-            let masked = bits.to_bit_buffer() & validity;
-            (masked.true_count() as u64, validity.true_count() as u64)
-        }
+        AllOr::All => (array.bit_buffer_view().true_count(), array.as_ref().len()),
+        AllOr::Some(validity) => (
+            array.to_bit_buffer().bitand(validity).true_count(),
+            validity.true_count(),
+        ),
     };
 
     if true_count > 0 {

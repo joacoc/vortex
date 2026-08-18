@@ -1,22 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-use vortex_array::Array;
 use vortex_array::ExecutionCtx;
-use vortex_array::arrays::Primitive;
+use vortex_array::arrays::PrimitiveArray;
 use vortex_array::dtype::PType;
 use vortex_array::match_each_float_ptype;
 use vortex_array::match_each_integer_ptype;
 use vortex_error::VortexResult;
 use vortex_mask::Mask;
 
-use crate::layouts::zoned::aggregates::bloom_filter::BloomPartial;
+use super::BloomPartial;
 
 pub(super) fn accumulate_primitive(
-    array: &Array<Primitive>,
+    array: &PrimitiveArray,
     partial: &mut BloomPartial,
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<()> {
+    // TODO (joacoc): What about using density threshold?
     // TODO (joacoc): What about a single new macro that separates both:
     // match... {
     //      Floats => ..
@@ -42,34 +42,6 @@ pub(super) fn accumulate_primitive(
                         }
                     }
                 };
-
-                // TODO (joacoc): What about using density threshold?
-                // const INSERT_SLICES_DENSITY_THRESHOLD: f64 = 0.8;
-                // let slice = array.as_slice::<T>();
-                // match array
-                //     .validity()?
-                //     .execute_mask(slice.len(), ctx)?
-                //     .threshold_iter(INSERT_SLICES_DENSITY_THRESHOLD)
-                // {
-                //     AllOr::None => {}
-                //     AllOr::All => {
-                //         for &value in slice {
-                //             partial.insert(value.to_bits());
-                //         }
-                //     }
-                //     AllOr::Some(MaskIter::Slices(slices)) => {
-                //         for &(start, end) in slices {
-                //             for &value in &slice[start..end] {
-                //                 partial.insert(value.to_bits());
-                //             }
-                //         }
-                //     }
-                //     AllOr::Some(MaskIter::Indices(indices)) => {
-                //         for &idx in indices {
-                //             partial.insert(slice[idx].to_bits());
-                //         }
-                //     }
-                // }
             });
         }
 
@@ -92,33 +64,6 @@ pub(super) fn accumulate_primitive(
                         }
                     }
                 };
-
-                // TODO (joacoc): What about using density threshold?
-                // let slice = array.as_slice::<T>();
-                // match array
-                //     .validity()?
-                //     .execute_mask(slice.len(), ctx)?
-                //     .threshold_iter(INSERT_SLICES_DENSITY_THRESHOLD)
-                // {
-                //     AllOr::None => {}
-                //     AllOr::All => {
-                //         for &value in slice {
-                //             partial.insert(value);
-                //         }
-                //     }
-                //     AllOr::Some(MaskIter::Slices(slices)) => {
-                //         for &(start, end) in slices {
-                //             for &value in &slice[start..end] {
-                //                 partial.insert(value);
-                //             }
-                //         }
-                //     }
-                //     AllOr::Some(MaskIter::Indices(indices)) => {
-                //         for &idx in indices {
-                //             partial.insert(slice[idx]);
-                //         }
-                //     }
-                // }
             });
         }
     }

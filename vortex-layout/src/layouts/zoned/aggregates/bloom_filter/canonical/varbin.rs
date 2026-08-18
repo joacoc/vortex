@@ -1,18 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-use vortex_array::Array;
 use vortex_array::ExecutionCtx;
-use vortex_array::arrays::VarBinView;
+use vortex_array::arrays::VarBinViewArray;
 use vortex_array::arrays::varbinview::BinaryView;
 use vortex_buffer::Buffer;
 use vortex_error::VortexResult;
 use vortex_mask::Mask;
 
-use crate::layouts::zoned::aggregates::bloom_filter::BloomPartial;
+use super::BloomPartial;
 
 pub(super) fn accumulate_varbin(
-    array: &Array<VarBinView>,
+    array: &VarBinViewArray,
     partial: &mut BloomPartial,
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<()> {

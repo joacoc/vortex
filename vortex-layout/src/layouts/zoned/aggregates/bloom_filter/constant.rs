@@ -2,15 +2,26 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use vortex_array::arrays::ConstantArray;
+use vortex_array::scalar::Scalar;
 use vortex_error::VortexResult;
 
-use crate::layouts::zoned::aggregates::bloom_filter::BloomPartial;
+use super::BloomPartial;
 
+/// Accumulates a constant sharing the same [Scalar]-based hash path used
+/// for Bloom-filter pruning.
+///
+/// Constant accumulation implementation is different from canonicals,
+/// in the sense that canonicals' value extraction happens outside
+/// the [BloomPartial], while for a [Scalar]/`Constant`,
+/// value extraction happens inside the partial/filter.
+///
+/// This is because constant accumulation and pruning both use [Scalar],
+/// so a common place for both is the [BloomPartial].
 pub(super) fn accumulate_constant(
     constant: &ConstantArray,
     partial: &mut BloomPartial,
 ) -> VortexResult<()> {
-    let scalar = constant.scalar();
+    let scalar: &Scalar = constant.scalar();
 
     // Omit NULL values on purpose.
     if scalar.is_null() {
