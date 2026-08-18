@@ -30,7 +30,7 @@ use vortex_array::scalar_fn::fns::binary::Binary;
 use vortex_array::scalar_fn::fns::literal::Literal;
 use vortex_array::scalar_fn::fns::operators::Operator;
 use vortex_array::scalar_fn::session::ScalarFnSessionExt;
-use vortex_array::stats::expr::bound_stat;
+use vortex_array::stats::expr::bound::stat as bound_stat;
 use vortex_array::stats::rewrite::StatsRewriteCtx;
 use vortex_array::stats::rewrite::StatsRewriteRule;
 use vortex_array::stats::session::StatsSessionExt;
