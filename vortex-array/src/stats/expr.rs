@@ -31,7 +31,7 @@ pub fn stat(expr: Expression, aggregate_fn: AggregateFnRef) -> Expression {
     StatFn.new_expr(StatOptions::new(aggregate_fn), [expr])
 }
 
-fn bound_stat(expr: BoundExpression, aggregate_fn: AggregateFnRef) -> BoundExpression {
+pub fn bound_stat(expr: BoundExpression, aggregate_fn: AggregateFnRef) -> BoundExpression {
     StatFn
         .try_new_bound_expr(StatOptions::new(aggregate_fn), [expr])
         .vortex_expect("stat expressions must use an aggregate supported by the child dtype")

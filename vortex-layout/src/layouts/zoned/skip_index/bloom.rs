@@ -17,9 +17,8 @@ use vortex_array::arrays::varbinview::VarBinViewArrayExt;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::Nullability;
 use vortex_array::dtype::PType;
-use vortex_array::expr::Expression;
-use vortex_array::expr::is_root;
-use vortex_array::expr::not;
+use vortex_array::expr::BoundExpression;
+use vortex_array::expr::bound::not;
 use vortex_array::scalar::Scalar;
 use vortex_array::scalar_fn::Arity;
 use vortex_array::scalar_fn::ChildName;
@@ -31,10 +30,10 @@ use vortex_array::scalar_fn::fns::binary::Binary;
 use vortex_array::scalar_fn::fns::literal::Literal;
 use vortex_array::scalar_fn::fns::operators::Operator;
 use vortex_array::scalar_fn::session::ScalarFnSessionExt;
+use vortex_array::stats::expr::bound_stat;
 use vortex_array::stats::rewrite::StatsRewriteCtx;
 use vortex_array::stats::rewrite::StatsRewriteRule;
 use vortex_array::stats::session::StatsSessionExt;
-use vortex_array::stats::stat;
 use vortex_buffer::BitBuffer;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
@@ -167,10 +166,6 @@ impl ScalarFnVTable for BloomContains {
         Ok(BoolArray::new(BitBuffer::from_iter(possible), validity).into_array())
     }
 
-    fn is_null_sensitive(&self, _options: &Self::Options) -> bool {
-        false
-    }
-
     fn is_fallible(&self, _options: &Self::Options) -> bool {
         false
     }
@@ -189,16 +184,16 @@ impl StatsRewriteRule for BloomEqRewrite {
 
     fn falsify(
         &self,
-        expr: &Expression,
+        expr: &BoundExpression,
         ctx: &StatsRewriteCtx<'_>,
-    ) -> VortexResult<Option<Expression>> {
+    ) -> VortexResult<Option<BoundExpression>> {
         if *expr.as_::<Binary>() != Operator::Eq {
             return Ok(None);
         }
 
-        let (column, literal) = if is_root(expr.child(0)) && expr.child(1).is::<Literal>() {
+        let (column, literal) = if expr.child(0).is_root() && expr.child(1).is::<Literal>() {
             (expr.child(0), expr.child(1))
-        } else if is_root(expr.child(1)) && expr.child(0).is::<Literal>() {
+        } else if expr.child(1).is_root() && expr.child(0).is::<Literal>() {
             (expr.child(1), expr.child(0))
         } else {
             return Ok(None);
@@ -209,8 +204,9 @@ impl StatsRewriteRule for BloomEqRewrite {
             return Ok(None);
         }
 
-        let filter = stat(column.clone(), BloomFilter.bind(self.options.clone()));
-        let contains = BloomContains.new_expr(self.options.clone(), [filter, literal.clone()]);
+        let filter = bound_stat(column.clone(), BloomFilter.bind(self.options.clone()));
+        let contains =
+            BloomContains.try_new_bound_expr(self.options.clone(), [filter, literal.clone()])?;
         Ok(Some(not(contains)))
     }
 }
@@ -225,9 +221,9 @@ mod tests {
     use vortex_array::dtype::DType;
     use vortex_array::dtype::Nullability;
     use vortex_array::dtype::PType;
-    use vortex_array::expr::eq;
-    use vortex_array::expr::lit;
-    use vortex_array::expr::root;
+    use vortex_array::expr::bound::eq;
+    use vortex_array::expr::bound::lit;
+    use vortex_array::expr::bound::root;
     use vortex_array::validity::Validity;
     use vortex_error::VortexResult;
 
@@ -248,16 +244,14 @@ mod tests {
         let session = vortex_array::array_session();
         let index = BloomSkipIndex::new(small_options());
         index.register(&session);
-        let predicate = eq(root(), lit(42i64));
+        let dtype = DType::Primitive(PType::I64, Nullability::NonNullable);
+        let predicate = eq(root(dtype.clone()), lit(42i64));
         let proof = predicate
-            .falsify(
-                &DType::Primitive(PType::I64, Nullability::NonNullable),
-                &session,
-            )?
+            .falsify(&session)?
             .expect("equality has a bloom proof");
 
         let zone_map = ZoneMap::try_new(
-            DType::Primitive(PType::I64, Nullability::NonNullable),
+            dtype,
             StructArray::try_new(Vec::<&str>::new().into(), vec![], 2, Validity::NonNullable)?,
             Arc::new([]),
             8,

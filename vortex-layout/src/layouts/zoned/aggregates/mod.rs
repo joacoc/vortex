@@ -8,13 +8,6 @@ use std::sync::Arc;
 use vortex_array::aggregate_fn::AggregateFnRef;
 use vortex_array::aggregate_fn::AggregateFnVTableExt;
 use vortex_array::aggregate_fn::EmptyOptions;
-use vortex_array::aggregate_fn::NumericalAggregateOpts;
-use vortex_array::aggregate_fn::fns::bounded_max::BoundedMax;
-use vortex_array::aggregate_fn::fns::bounded_max::BoundedMaxOptions;
-use vortex_array::aggregate_fn::fns::bounded_min::BoundedMin;
-use vortex_array::aggregate_fn::fns::bounded_min::BoundedMinOptions;
-use vortex_array::aggregate_fn::fns::max::Max;
-use vortex_array::aggregate_fn::fns::min::Min;
 use vortex_array::aggregate_fn::fns::nan_count::NanCount;
 use vortex_array::aggregate_fn::fns::null_count::NullCount;
 use vortex_array::aggregate_fn::session::AggregateFnSessionExt;
@@ -26,7 +19,7 @@ pub(in crate::layouts::zoned) use bloom_filter::BloomFilter;
 pub(in crate::layouts::zoned) use bloom_filter::bloom_contains;
 pub(in crate::layouts::zoned) use bloom_filter::i64_value;
 
-use crate::layouts::zoned::schema::default_bounded_stat_max_bytes;
+use crate::layouts::zoned::aggregates::min_max::min_max_aggregate_fns;
 
 pub mod bloom_filter;
 
@@ -34,20 +27,7 @@ pub(super) fn default_zoned_aggregate_fns(
     dtype: &DType,
     session: &VortexSession,
 ) -> Arc<[AggregateFnRef]> {
-    let (max, min) = match dtype {
-        DType::Utf8(_) | DType::Binary(_) => (
-            BoundedMax.bind(BoundedMaxOptions {
-                max_bytes: default_bounded_stat_max_bytes(),
-            }),
-            BoundedMin.bind(BoundedMinOptions {
-                max_bytes: default_bounded_stat_max_bytes(),
-            }),
-        ),
-        _ => (
-            Max.bind(NumericalAggregateOpts::skip_nans()),
-            Min.bind(NumericalAggregateOpts::skip_nans()),
-        ),
-    };
+    let [max, min] = min_max_aggregate_fns(dtype);
 
     // Sum is deliberately absent: zone maps exist to prune, and a zone sum prunes nothing.
     // Its semantics are also unsettled - null-on-empty was changed in #9113 and reverted in
