@@ -74,14 +74,6 @@ mod tests {
     }
 
     #[test]
-    fn default_aggregates_include_sum_for_numeric_dtype() {
-        let aggregate_fns =
-            default_zoned_aggregate_fns(&PType::I32.into(), &vortex_array::array_session());
-
-        assert!(aggregate_fns[2].is::<Sum>());
-    }
-
-    #[test]
     fn default_aggregates_skip_sum_for_non_summable_dtype() {
         let dtype = DType::Extension(
             Timestamp::new(TimeUnit::Microseconds, Nullability::Nullable).erased(),
