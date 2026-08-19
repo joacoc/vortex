@@ -253,20 +253,6 @@ impl BloomPartial {
     }
 }
 
-/// Contains for generic type [T] is used only for tests,
-/// for scalars use [BloomPartial::contains_valid_scalar].
-#[cfg(test)]
-impl BloomPartial {
-    #[inline]
-    pub(super) fn contains<T>(&self, value: T) -> bool
-    where
-        T: AsRef<[u8]>,
-    {
-        let hash = self.hash(value);
-        self.find_hash(hash)
-    }
-}
-
 impl Into<Vec<u8>> for &BloomPartial {
     fn into(self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(self.len() * BLOCK_SIZE);
@@ -286,13 +272,6 @@ impl From<&BloomOptions> for BloomPartial {
         Self {
             blocks: vec![[0u32; 8]; options.blocks_count.get()],
         }
-    }
-}
-
-#[cfg(test)]
-impl From<Vec<[u32; 8]>> for BloomPartial {
-    fn from(value: Vec<[u32; 8]>) -> Self {
-        BloomPartial { blocks: value }
     }
 }
 
@@ -330,5 +309,107 @@ impl TryFrom<&[u8]> for BloomPartial {
 impl PartialEq for BloomPartial {
     fn eq(&self, other: &Self) -> bool {
         self.blocks == other.blocks
+    }
+}
+
+/// Contains for generic type [T] is used only for tests,
+/// for scalars use [BloomPartial::contains_valid_scalar].
+#[cfg(test)]
+impl BloomPartial {
+    #[inline]
+    pub(super) fn contains<T>(&self, value: T) -> bool
+    where
+        T: AsRef<[u8]>,
+    {
+        let hash = self.hash(value);
+        self.find_hash(hash)
+    }
+}
+
+#[cfg(test)]
+impl From<Vec<[u32; 8]>> for BloomPartial {
+    fn from(value: Vec<[u32; 8]>) -> Self {
+        BloomPartial { blocks: value }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+
+    use vortex_array::dtype::ToBytes;
+
+    use crate::layouts::zoned::aggregates::bloom_filter::BloomOptions;
+    use crate::layouts::zoned::aggregates::bloom_filter::BloomPartial;
+    use crate::layouts::zoned::aggregates::bloom_filter::DEFAULT_BLOCKS_COUNT;
+
+    #[test]
+    fn biger_filter_size() {
+        // The idea is to create a bigger bloom filter than the default one.
+        //
+        // Inside will only be even numbers. The presence of an odd
+        // number would be incorrect. At the time of writing,
+        // for 256,000 blocks (~8MiB), no false positive is detected for 500k unique values.
+        let options = BloomOptions::new(
+            NonZeroUsize::new(DEFAULT_BLOCKS_COUNT * 1000).expect("valid nonzero usize"),
+        );
+        let mut bloom_filter = BloomPartial::from(&options);
+
+        for i in 1..=1_000_000u64 {
+            if i % 2 == 0 {
+                bloom_filter.insert(i.to_le_bytes());
+            }
+        }
+
+        for i in 1..=1_000_000u64 {
+            if i % 2 == 0 {
+                assert!(
+                    bloom_filter.contains(i.to_le_bytes()),
+                    "expected {i} to exist"
+                );
+            } else {
+                assert!(
+                    !bloom_filter.contains(i.to_le_bytes()),
+                    "expected odd number {i} to not exist"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn valid_serde() {
+        let mut bloom_filter = BloomPartial::from(&BloomOptions::default());
+        bloom_filter.insert(32.to_le_bytes());
+
+        let bytes: Vec<u8> = (&bloom_filter).into();
+        let valid_filter = BloomPartial::try_from(bytes.as_slice()).unwrap();
+
+        assert!(
+            valid_filter.contains(32.to_le_bytes()),
+            "expect filter to have value"
+        );
+
+        assert!(
+            !valid_filter.contains(14.to_le_bytes()),
+            "expect filter to not have value"
+        );
+    }
+
+    #[test]
+    fn invalid_serde() {
+        let mut bloom_filter = BloomPartial::from(&BloomOptions::default());
+        bloom_filter.insert(32.to_le_bytes());
+
+        let mut bytes: Vec<u8> = (&bloom_filter).into();
+        bytes.pop();
+        let invalid_filter = BloomPartial::try_from(bytes.as_slice());
+
+        assert!(invalid_filter.is_err(), "expect filter to be invalid");
+
+        let mut bytes: Vec<u8> = (&bloom_filter).into();
+        bytes.push(0u8);
+        let invalid_filter = BloomPartial::try_from(bytes.as_slice());
+
+        assert!(invalid_filter.is_err(), "expect filter to be invalid");
     }
 }

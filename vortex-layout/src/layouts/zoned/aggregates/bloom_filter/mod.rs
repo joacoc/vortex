@@ -62,7 +62,7 @@ impl BloomOptions {
         Self { blocks_count }
     }
 
-    pub fn blocks(&self) -> NonZeroUsize {
+    pub fn blocks_count(&self) -> NonZeroUsize {
         self.blocks_count
     }
 }
