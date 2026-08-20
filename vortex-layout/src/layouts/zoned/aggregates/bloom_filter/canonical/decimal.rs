@@ -148,7 +148,7 @@ mod tests {
         let mixed = present
             .iter()
             .enumerate()
-            .map(|(i, &v)| if i % 2 == 0 { Some(v) } else { None });
+            .map(|(i, &v)| (i % 2 == 0).then_some(v));
         let bloom_filter = build_filter(
             DecimalArray::from_option_iter(mixed, decimal_dtype).into_array(),
             DType::Decimal(decimal_dtype, Nullability::Nullable),

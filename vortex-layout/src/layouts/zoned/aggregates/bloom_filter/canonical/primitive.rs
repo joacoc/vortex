@@ -4,6 +4,7 @@
 use vortex_array::ExecutionCtx;
 use vortex_array::arrays::PrimitiveArray;
 use vortex_array::dtype::PType;
+use vortex_array::dtype::ToBytes;
 use vortex_array::match_each_float_ptype;
 use vortex_array::match_each_integer_ptype;
 use vortex_error::VortexResult;
@@ -23,50 +24,77 @@ pub(super) fn accumulate_primitive(
     //      Integers => ..
     // }
     match array.ptype() {
-        PType::F16 | PType::F32 | PType::F64 => {
-            match_each_float_ptype!(array.ptype(), |T| {
-                let slice = array.as_slice::<T>();
-
-                match array.validity()?.execute_mask(slice.len(), ctx)? {
-                    Mask::AllTrue(_) => {
-                        for &value in slice {
-                            partial.insert_primitive(value);
-                        }
-                    }
-                    Mask::AllFalse(_) => {}
-                    Mask::Values(mask_values) => {
-                        for &(start, end) in mask_values.slices() {
-                            for &value in &slice[start..end] {
-                                partial.insert_primitive(value);
-                            }
-                        }
-                    }
-                };
-            });
-        }
-
-        _ => {
-            match_each_integer_ptype!(array.ptype(), |T| {
-                let slice = array.as_slice::<T>();
-
-                match array.validity()?.execute_mask(slice.len(), ctx)? {
-                    Mask::AllTrue(_) => {
-                        for &value in slice {
-                            partial.insert_primitive(value);
-                        }
-                    }
-                    Mask::AllFalse(_) => {}
-                    Mask::Values(mask_values) => {
-                        for &(start, end) in mask_values.slices() {
-                            for &value in &slice[start..end] {
-                                partial.insert_primitive(value);
-                            }
-                        }
-                    }
-                };
-            });
-        }
+        PType::F16 | PType::F32 | PType::F64 => accumulate_primitive_float(array, partial, ctx)?,
+        _ => accumulate_primitive_int(array, partial, ctx)?,
     }
+
+    Ok(())
+}
+
+fn accumulate_primitive_float(
+    array: &PrimitiveArray,
+    partial: &mut BloomPartial,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<()> {
+    match_each_float_ptype!(array.ptype(), |T| {
+        let slice = array.as_slice::<T>();
+
+        match array.validity()?.execute_mask(slice.len(), ctx)? {
+            Mask::AllTrue(_) => {
+                for value in slice {
+                    partial.insert_primitive(value);
+                }
+            }
+            Mask::AllFalse(_) => {}
+            Mask::Values(mask_values) => {
+                for &(start, end) in mask_values.slices() {
+                    for value in &slice[start..end] {
+                        partial.insert_primitive(value);
+                    }
+                }
+            }
+        };
+    });
+
+    Ok(())
+}
+
+fn accumulate_primitive_int(
+    array: &PrimitiveArray,
+    partial: &mut BloomPartial,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<()> {
+    match_each_integer_ptype!(array.ptype(), |T| {
+        insert_integer_slice(array, partial, ctx, array.as_slice::<T>())?
+    });
+
+    Ok(())
+}
+
+fn insert_integer_slice<T>(
+    array: &PrimitiveArray,
+    partial: &mut BloomPartial,
+    ctx: &mut ExecutionCtx,
+    slice: &[T],
+) -> VortexResult<()>
+where
+    T: ToBytes,
+{
+    match array.validity()?.execute_mask(slice.len(), ctx)? {
+        Mask::AllTrue(_) => {
+            for value in slice {
+                partial.insert_primitive(value);
+            }
+        }
+        Mask::AllFalse(_) => {}
+        Mask::Values(mask_values) => {
+            for &(start, end) in mask_values.slices() {
+                for value in &slice[start..end] {
+                    partial.insert_primitive(value);
+                }
+            }
+        }
+    };
 
     Ok(())
 }
@@ -171,7 +199,7 @@ mod tests {
         let mixed: Vec<Option<T>> = present
             .iter()
             .enumerate()
-            .map(|(i, &v)| if i % 2 == 0 { Some(v) } else { None })
+            .map(|(i, &v)| (i % 2 == 0).then_some(v))
             .collect();
 
         let bloom_filter = build_filter(

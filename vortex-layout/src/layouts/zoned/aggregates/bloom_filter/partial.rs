@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright the Vortex contributors
+
 //! Split block Bloom filters (SBBF) implementation for Vortex.
 //!
 //! This implementation follows the original paper, renaming `bucket` to `block`,
@@ -5,9 +8,6 @@
 //! code for `make_mask`, `add_hash`, and `find_hash`.
 //!
 //! [Split block Bloom filters]: https://arxiv.org/pdf/2101.01719
-
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use twox_hash::XxHash3_64;
 use vortex_array::dtype::DType;
@@ -24,8 +24,11 @@ use vortex_error::vortex_err;
 
 use super::BloomOptions;
 
+const LANES_PER_BLOCK: usize = 8;
+const BYTES_PER_LANE: usize = size_of::<u32>(); // 4 bytes
+
 /// Block size (32 bytes [256 bits])
-pub(super) const BLOCK_SIZE: usize = 8 * size_of::<u32>();
+pub(super) const BLOCK_SIZE: usize = LANES_PER_BLOCK * BYTES_PER_LANE;
 
 /// Represents a Split block Bloom Filter filter for a single layout zone.
 pub struct BloomPartial {
@@ -55,6 +58,11 @@ impl BloomPartial {
         self.add_hash(hash);
     }
 
+    /// Produces a 64-bit hash.
+    ///
+    /// This follows the reference implementation, where
+    /// the upper 32 bits select the block and the lower 32 bits determine the bit
+    /// positions within that block.
     #[inline]
     fn hash<T>(&self, value: T) -> u64
     where
@@ -65,20 +73,32 @@ impl BloomPartial {
         XxHash3_64::oneshot_with_seed(0, value.as_ref())
     }
 
-    fn add_hash(&mut self, hash: u64) {
-        let idx = self.block_index(hash, self.blocks.len()) as usize;
-        let mask = self.make_mask(hash as u32);
+    /// Returns the lower 32 bits of the hash used to construct the block mask.
+    #[inline]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the mask uses the low 32 bits of the 64-bit hash"
+    )]
+    fn lower_hash_bits(&self, hash: u64) -> u32 {
+        hash as u32
+    }
 
-        // or the mask into the existing bucket
+    fn add_hash(&mut self, hash: u64) {
+        let block_idx = self.block_index(hash, self.blocks.len());
+        let mask = self.make_mask(self.lower_hash_bits(hash));
+
+        // The original solution uses _mm256_sllv_epi32
+        // or the mask into the existing block
         for i in 0..8 {
-            self.blocks[idx][i] |= mask[i];
+            self.blocks[block_idx][i] |= mask[i];
         }
     }
 
     /// Checks whether a hash is (probably) present in the filter.
     fn find_hash(&self, hash: u64) -> bool {
-        let idx = self.block_index(hash, self.blocks.len()) as usize;
-        let mask = self.make_mask(hash as u32);
+        let idx = self.block_index(hash, self.blocks.len());
+        let mask = self.make_mask(self.lower_hash_bits(hash));
+
         let mut missing = 0u32;
         let block = &self.blocks[idx];
 
@@ -115,9 +135,16 @@ impl BloomPartial {
         out
     }
 
+    /// Returns the index of the block to which a hash belongs.
+    ///
+    /// For details about the algorithm, see
+    /// [Lemire's FastRange](https://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction/).
+    ///
+    /// Although `blocks_count` is a `usize`, its value is limited to `u32::MAX`
+    /// by [`BloomOptions`] and the serialization format.
     #[inline]
-    fn block_index(&self, hash: u64, blocks_count: usize) -> u64 {
-        ((hash >> 32) * (blocks_count as u64)) >> 32
+    fn block_index(&self, hash: u64, blocks_count: usize) -> usize {
+        (((hash >> 32) * blocks_count as u64) >> 32) as usize
     }
 }
 
@@ -134,7 +161,7 @@ impl BloomPartial {
     }
 
     #[inline]
-    pub(super) fn combine_with_other(&mut self, other: BloomPartial) {
+    pub(super) fn combine_with_other(&mut self, other: &BloomPartial) {
         for (dst, src) in self.blocks.iter_mut().zip(other.blocks.iter()) {
             for i in 0..8 {
                 dst[i] |= src[i];
@@ -238,13 +265,15 @@ impl BloomPartial {
         scalar: &Scalar,
     ) -> VortexResult<()> {
         let hash = self.hash_valid_scalar(scalar)?;
-        Ok(self.insert_hash(hash))
+        self.insert_hash(hash);
+
+        Ok(())
     }
 
     /// Given that primitives have the trait [ToBytes]
     /// give them a better path.
     #[inline]
-    pub(super) fn insert_primitive<T>(&mut self, value: T)
+    pub(super) fn insert_primitive<T>(&mut self, value: &T)
     where
         T: ToBytes,
     {
@@ -253,11 +282,11 @@ impl BloomPartial {
     }
 }
 
-impl Into<Vec<u8>> for &BloomPartial {
-    fn into(self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(self.len() * BLOCK_SIZE);
+impl From<&BloomPartial> for Vec<u8> {
+    fn from(val: &BloomPartial) -> Self {
+        let mut bytes = Vec::with_capacity(val.len() * BLOCK_SIZE);
         bytes.extend(
-            self.blocks
+            val.blocks
                 .iter()
                 .flatten()
                 .flat_map(|block_seq| block_seq.to_le_bytes()),
@@ -270,7 +299,7 @@ impl Into<Vec<u8>> for &BloomPartial {
 impl From<&BloomOptions> for BloomPartial {
     fn from(options: &BloomOptions) -> Self {
         Self {
-            blocks: vec![[0u32; 8]; options.blocks_count.get()],
+            blocks: vec![[0u32; 8]; options.blocks_count.get() as usize],
         }
     }
 }
@@ -282,23 +311,35 @@ impl TryFrom<&[u8]> for BloomPartial {
     /// (the same layout produced by `to_scalar`).
     fn try_from(bytes: &[u8]) -> VortexResult<Self> {
         vortex_ensure!(
-            !bytes.is_empty() && bytes.len() % BLOCK_SIZE == 0,
+            !bytes.is_empty() && bytes.len().is_multiple_of(BLOCK_SIZE),
             "invalid bloom filter byte length: {}",
             bytes.len()
         );
 
         let blocks = bytes
-            .chunks_exact(BLOCK_SIZE)
+            .as_chunks::<BLOCK_SIZE>()
+            .0
+            .iter()
             .map(|chunk| {
+                let (lane_bytes, remainder) = chunk.as_chunks::<BYTES_PER_LANE>();
                 let mut block = [0u32; 8];
-                for (lane, lane_bytes) in block.iter_mut().zip(chunk.chunks_exact(4)) {
-                    *lane = u32::from_le_bytes(lane_bytes.try_into().map_err(|_| {
-                        vortex_err!("invalid bloom filter word length: {}", lane_bytes.len())
-                    })?);
+                vortex_ensure!(
+                    remainder.is_empty(),
+                    "invalid bloom filter, unexpected remainder bytes"
+                );
+
+                for (lane, lane_bytes) in block.iter_mut().zip(lane_bytes) {
+                    *lane = u32::from_le_bytes(*lane_bytes);
                 }
+
                 Ok(block)
             })
             .collect::<VortexResult<Vec<_>>>()?;
+
+        vortex_ensure!(
+            !blocks.is_empty() && u32::try_from(blocks.len()).is_ok(),
+            "bloom blocks length must be non-zero and lower than u32::MAX",
+        );
 
         Ok(BloomPartial { blocks })
     }
@@ -335,7 +376,7 @@ impl From<Vec<[u32; 8]>> for BloomPartial {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroUsize;
+    use std::num::NonZeroU32;
 
     use vortex_array::dtype::ToBytes;
 
@@ -344,14 +385,20 @@ mod tests {
     use crate::layouts::zoned::aggregates::bloom_filter::DEFAULT_BLOCKS_COUNT;
 
     #[test]
-    fn biger_filter_size() {
-        // The idea is to create a bigger bloom filter than the default one.
+    fn bigger_filter_size() {
+        // The idea is to create a bigger Bloom filter than the default one (1000x approx. ~8MiB),
+        // but also so big that the chance of a false positive is not zero but is very low.
+        // For this fixed set of values ([1, 1M]), as of this writing,
+        // no false positives appear.
         //
-        // Inside will only be even numbers. The presence of an odd
-        // number would be incorrect. At the time of writing,
-        // for 256,000 blocks (~8MiB), no false positive is detected for 500k unique values.
+        // The filter contains only even numbers. Finding an odd number would be a
+        // valid Bloom-filter false positive, but because this test currently has none,
+        // seeing one in the future would mean that something changed and should be reviewed.
+        //
+        // A change in how hashes are calculated or how the block index is selected
+        // could trigger this assertion, like a kind of smoke test.
         let options = BloomOptions::new(
-            NonZeroUsize::new(DEFAULT_BLOCKS_COUNT * 1000).expect("valid nonzero usize"),
+            NonZeroU32::new(DEFAULT_BLOCKS_COUNT * 1000).expect("valid nonzero usize"),
         );
         let mut bloom_filter = BloomPartial::from(&options);
 

@@ -1,13 +1,13 @@
-//! Bloom-filter aggregate for zoned layouts.
-
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
+
+//! Bloom-filter aggregate for zoned layouts.
 
 use std::fmt;
 use std::fmt::Display;
 use std::fmt::Formatter;
 use std::hash::Hash;
-use std::num::NonZeroUsize;
+use std::num::NonZeroU32;
 
 use vortex_array::ArrayRef;
 use vortex_array::Columnar;
@@ -31,7 +31,7 @@ pub(in crate::layouts::zoned) mod constant;
 pub use partial::BloomPartial;
 
 /// The default value is derived from the default `WriteStrategyBuilder::row_block_size`
-const DEFAULT_BLOCKS_COUNT: usize = 256;
+const DEFAULT_BLOCKS_COUNT: u32 = 256;
 
 /// Bloom-filter tuning options
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -54,15 +54,15 @@ pub struct BloomOptions {
     /// |           8,192 | **256 KiB** |         |
     /// |          65,536 |   **2 MiB** |         |
     /// |       1,048,576 |  **32 MiB** |         |
-    blocks_count: NonZeroUsize,
+    blocks_count: NonZeroU32,
 }
 
 impl BloomOptions {
-    pub fn new(blocks_count: NonZeroUsize) -> Self {
+    pub fn new(blocks_count: NonZeroU32) -> Self {
         Self { blocks_count }
     }
 
-    pub fn blocks_count(&self) -> NonZeroUsize {
+    pub fn blocks_count(&self) -> NonZeroU32 {
         self.blocks_count
     }
 }
@@ -70,8 +70,8 @@ impl BloomOptions {
 impl Default for BloomOptions {
     fn default() -> Self {
         Self {
-            blocks_count: NonZeroUsize::new(DEFAULT_BLOCKS_COUNT)
-                .vortex_expect("valid blocks size"),
+            blocks_count: NonZeroU32::new(DEFAULT_BLOCKS_COUNT)
+                .vortex_expect("valid nonzero u32 value"),
         }
     }
 }
@@ -112,7 +112,7 @@ impl AggregateFnVTable for BloomFilter {
     }
 
     fn serialize(&self, options: &Self::Options) -> VortexResult<Option<Vec<u8>>> {
-        let blocks = u32::try_from(options.blocks_count.get())?;
+        let blocks = options.blocks_count.get();
         let metadata = blocks.to_le_bytes().to_vec();
         Ok(Some(metadata))
     }
@@ -123,11 +123,12 @@ impl AggregateFnVTable for BloomFilter {
         _session: &VortexSession,
     ) -> VortexResult<Self::Options> {
         vortex_ensure_eq!(metadata.len(), 4, "invalid bloom metadata length");
+
         let blocks = u32::from_le_bytes([metadata[0], metadata[1], metadata[2], metadata[3]]);
-        Ok(BloomOptions::new(
-            NonZeroUsize::new(blocks as usize)
-                .ok_or_else(|| vortex_err!("bloom blocks length must be non-zero"))?,
-        ))
+
+        Ok(BloomOptions::new(NonZeroU32::new(blocks).ok_or_else(
+            || vortex_err!("bloom blocks length must be non-zero"),
+        )?))
     }
 
     /// Returns [Binary(Nullability::NonNullable)] when input [DType] is valid.
@@ -169,7 +170,7 @@ impl AggregateFnVTable for BloomFilter {
             "bloom partial block count mismatch — partials built with different blocks_count"
         );
 
-        partial.combine_with_other(other);
+        partial.combine_with_other(&other);
 
         Ok(())
     }
@@ -218,8 +219,7 @@ impl AggregateFnVTable for BloomFilter {
 /// Returns true if the type is valid for the bloom index to acc/contain.
 ///
 /// This is defined by the available implementations in
-/// [crate::layouts::zoned::aggregates::bloom::constant] and
-/// [crate::layouts::zoned::aggregates::bloom::canonical]
+/// [constant::accumulate_constant] and [canonical::accumulate_canonical]
 fn is_bloom_valid_dtype(dtype: &DType) -> bool {
     match dtype {
         DType::Extension(ext) => is_bloom_valid_dtype(ext.storage_dtype()),
@@ -239,10 +239,8 @@ pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
     use vortex_array::VortexSessionExecute;
     use vortex_array::aggregate_fn::Accumulator;
     use vortex_array::aggregate_fn::DynAccumulator;
-    use vortex_error::vortex_ensure;
 
     use super::*;
-    use crate::layouts::zoned::aggregates::bloom_filter::partial::BLOCK_SIZE;
 
     pub fn setup() -> VortexResult<ExecutionCtx> {
         let session = vortex_array::array_session();
@@ -257,24 +255,6 @@ pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
         Ok(ctx)
     }
 
-    pub fn extract_bloom_blocks(state: &Scalar) -> VortexResult<Vec<[u32; 8]>> {
-        let bytes = state.as_binary().value().expect("bloom state is non-null");
-        vortex_ensure!(bytes.len() % BLOCK_SIZE == 0, "invalid bloom state length");
-        let mut blocks = Vec::with_capacity(bytes.len() / 32);
-        for block_bytes in bytes.chunks_exact(32) {
-            let mut block = [0u32; 8];
-            for (word, word_bytes) in block.iter_mut().zip(block_bytes.chunks_exact(4)) {
-                *word = u32::from_le_bytes(
-                    word_bytes
-                        .try_into()
-                        .expect("chunks_exact(4) always produces 4 bytes"),
-                );
-            }
-            blocks.push(block);
-        }
-        Ok(blocks)
-    }
-
     pub fn build_filter(
         batch: ArrayRef,
         dtype: DType,
@@ -283,8 +263,12 @@ pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
         let mut accumulator = Accumulator::try_new(BloomFilter, BloomOptions::default(), dtype)?;
         accumulator.accumulate(&batch.into_array(), &mut ctx)?;
         let state = accumulator.finish()?;
-        let blocks = extract_bloom_blocks(&state)?;
-        let bloom_filter = BloomPartial::from(blocks);
+        let bytes = state
+            .as_binary()
+            .value()
+            .ok_or_else(|| vortex_err!("bloom state must be non-null"))?;
+
+        let bloom_filter = BloomPartial::try_from(bytes.as_slice())?;
 
         Ok(bloom_filter)
     }
@@ -309,7 +293,7 @@ pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
     #[test]
     fn combine_partials_rejects_mismatched_block_counts() -> VortexResult<()> {
         let mut smaller = BloomFilter.empty_partial(
-            &BloomOptions::new(NonZeroUsize::new(4).unwrap()),
+            &BloomOptions::new(NonZeroU32::new(4).unwrap()),
             &DType::Binary(Nullability::NonNullable),
         )?;
         let bigger = BloomFilter.empty_partial(
