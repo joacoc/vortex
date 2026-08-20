@@ -15,7 +15,6 @@ use vortex_array::dtype::PType;
 use vortex_array::dtype::ToBytes;
 use vortex_array::match_each_float_ptype;
 use vortex_array::match_each_integer_ptype;
-use vortex_array::scalar::DecimalValue;
 use vortex_array::scalar::Scalar;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
@@ -212,20 +211,6 @@ impl BloomPartial {
                     self.hash(value.to_le_bytes())
                 }),
             },
-            DType::Decimal(..) => {
-                let decimal = scalar
-                    .as_decimal()
-                    .decimal_value()
-                    .vortex_expect("non-null decimal value");
-                match decimal {
-                    DecimalValue::I8(v) => self.hash(v.to_le_bytes()),
-                    DecimalValue::I16(v) => self.hash(v.to_le_bytes()),
-                    DecimalValue::I32(v) => self.hash(v.to_le_bytes()),
-                    DecimalValue::I64(v) => self.hash(v.to_le_bytes()),
-                    DecimalValue::I128(v) => self.hash(v.to_le_bytes()),
-                    DecimalValue::I256(v) => self.hash(v.to_le_bytes()),
-                }
-            }
             DType::Utf8(_) => {
                 let buffer = scalar
                     .as_utf8()
@@ -398,7 +383,7 @@ mod tests {
         // A change in how hashes are calculated or how the block index is selected
         // could trigger this assertion, like a kind of smoke test.
         let options = BloomOptions::new(
-            NonZeroU32::new(DEFAULT_BLOCKS_COUNT * 1000).expect("valid nonzero usize"),
+            NonZeroU32::new(DEFAULT_BLOCKS_COUNT * 1000).expect("valid nonzero u32"),
         );
         let mut bloom_filter = BloomPartial::from(&options);
 
@@ -417,7 +402,7 @@ mod tests {
             } else {
                 assert!(
                     !bloom_filter.contains(i.to_le_bytes()),
-                    "expected odd number {i} to not exist"
+                    "unexpected false positive for odd number {i}"
                 );
             }
         }

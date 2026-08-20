@@ -7,13 +7,11 @@ use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 
 mod bool;
-mod decimal;
 mod extension;
 mod primitive;
 mod varbin;
 
 use bool::accumulate_bool;
-use decimal::accumulate_decimal;
 use extension::accumulate_extension;
 use primitive::accumulate_primitive;
 use varbin::accumulate_varbin;
@@ -28,15 +26,18 @@ pub(super) fn accumulate_canonical(
     match canonical {
         Canonical::Bool(array) => accumulate_bool(array, partial, ctx)?,
         Canonical::Primitive(array) => accumulate_primitive(array, partial, ctx)?,
-        Canonical::Decimal(array) => accumulate_decimal(array, partial, ctx)?,
         Canonical::VarBinView(array) => accumulate_varbin(array, partial, ctx)?,
         Canonical::Extension(array) => accumulate_extension(array, partial, ctx)?,
-
         // Nulls are skipped and are not included in any Bloom filter.
         Canonical::Null(_) => {}
 
         // TODO (joacoc): pending canonical
-        Canonical::Struct(_)
+        //
+        // TODO (joacoc): Add decimal support once the logical and physical type
+        // mismatch is resolved:
+        // <https://github.com/vortex-data/vortex/issues/5820>
+        Canonical::Decimal(_)
+        | Canonical::Struct(_)
         | Canonical::List(_)
         | Canonical::FixedSizeList(_)
         | Canonical::Variant(_)

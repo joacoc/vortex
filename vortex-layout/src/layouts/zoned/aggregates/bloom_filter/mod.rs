@@ -223,11 +223,7 @@ impl AggregateFnVTable for BloomFilter {
 fn is_bloom_valid_dtype(dtype: &DType) -> bool {
     match dtype {
         DType::Extension(ext) => is_bloom_valid_dtype(ext.storage_dtype()),
-        DType::Bool(_)
-        | DType::Primitive(..)
-        | DType::Decimal(..)
-        | DType::Utf8(_)
-        | DType::Binary(_) => true,
+        DType::Bool(_) | DType::Primitive(..) | DType::Utf8(_) | DType::Binary(_) => true,
         _ => false,
     }
 }
