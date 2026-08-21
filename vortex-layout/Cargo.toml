@@ -58,6 +58,7 @@ vortex-utils = { workspace = true, features = ["dashmap"] }
 divan = { workspace = true }
 futures = { workspace = true, features = ["executor"] }
 insta = { workspace = true }
+rand = { workspace = true }
 rstest = { workspace = true }
 temp-env = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
@@ -79,6 +80,10 @@ harness = false
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 uuid = { workspace = true, features = ["js"], optional = true }
+
+[[bench]]
+name = "bloom_filter"
+harness = false
 
 [lints]
 workspace = true

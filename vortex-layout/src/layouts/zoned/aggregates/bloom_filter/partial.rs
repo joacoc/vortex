@@ -39,12 +39,12 @@ impl BloomPartial {
     ///
     /// Matches [BloomOptions::blocks_count]
     #[inline]
-    pub fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         self.blocks.len()
     }
 
     #[inline]
-    pub(super) fn insert<T>(&mut self, value: T)
+    pub fn insert<T>(&mut self, value: T)
     where
         T: AsRef<[u8]>,
     {
@@ -55,6 +55,21 @@ impl BloomPartial {
     #[inline]
     fn insert_hash(&mut self, hash: u64) {
         self.add_hash(hash);
+    }
+
+    /// Returns `true` if `value` might be present in the filter.
+    ///
+    /// A `false` result guarantees that the value is absent. A `true` result may
+    /// be a false positive.
+    ///
+    /// Use `BloomPartial::contains_valid_scalar` for scalar values.
+    #[inline]
+    pub fn contains<T>(&self, value: T) -> bool
+    where
+        T: AsRef<[u8]>,
+    {
+        let hash = self.hash(value);
+        self.find_hash(hash)
     }
 
     /// Produces a 64-bit hash.
@@ -233,7 +248,11 @@ impl BloomPartial {
         })
     }
 
-    /// Returns true if the underlying value of a [Scalar] may be present.
+    /// Returns `true` if the underlying value of a [Scalar] might be present in the filter.
+    ///
+    /// A `false` result guarantees that the value is absent. A `true` result may
+    /// be a false positive.
+    ///
     /// Returns an error if the [Scalar] is invalid or its [DType] is unsupported.
     pub(in crate::layouts::zoned) fn contains_valid_scalar(
         &self,
@@ -335,20 +354,6 @@ impl TryFrom<&[u8]> for BloomPartial {
 impl PartialEq for BloomPartial {
     fn eq(&self, other: &Self) -> bool {
         self.blocks == other.blocks
-    }
-}
-
-/// Contains for generic type [T] is used only for tests,
-/// for scalars use [BloomPartial::contains_valid_scalar].
-#[cfg(test)]
-impl BloomPartial {
-    #[inline]
-    pub(super) fn contains<T>(&self, value: T) -> bool
-    where
-        T: AsRef<[u8]>,
-    {
-        let hash = self.hash(value);
-        self.find_hash(hash)
     }
 }
 

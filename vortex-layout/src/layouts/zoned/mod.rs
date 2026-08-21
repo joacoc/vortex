@@ -11,7 +11,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-mod aggregates;
+pub mod aggregates;
 mod builder;
 mod pruning;
 mod reader;
