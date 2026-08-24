@@ -11245,6 +11245,7 @@ dependencies = [
  "codspeed-divan-compat",
  "flatbuffers",
  "futures",
+ "goldenfile",
  "insta",
  "itertools 0.14.0",
  "kanal",

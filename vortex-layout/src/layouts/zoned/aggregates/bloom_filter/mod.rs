@@ -17,6 +17,7 @@ use vortex_array::aggregate_fn::AggregateFnVTable;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::Nullability;
 use vortex_array::scalar::Scalar;
+use vortex_error::VortexError;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure_eq;
@@ -29,11 +30,26 @@ mod partial;
 
 pub(in crate::layouts::zoned) mod constant;
 pub use partial::BloomPartial;
+pub use partial::HashFn;
 
 /// The default value is derived from the default `WriteStrategyBuilder::row_block_size`
 const DEFAULT_BLOCKS_COUNT: u32 = 256;
+/// Serialized options size expressed in bytes
+const OPTIONS_BYTES_LEN: usize = size_of::<u32>() * 2;
 
 /// Bloom-filter tuning options
+///
+/// **Serialization**
+///
+/// Bloom options are serialized in little-endian format:
+///
+/// ```text
+/// ┌───────────────────────┬───────────────────────┐
+/// │ bytes 0..4            │ bytes 4..8            │
+/// ├───────────────────────┼───────────────────────┤
+/// │ blocks_count (u32 LE) │ hash_fn (u32 LE)      │
+/// └───────────────────────┴───────────────────────┘
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BloomOptions {
     /// Number of blocks in the split block Bloom filter (SBBF).
@@ -55,11 +71,20 @@ pub struct BloomOptions {
     /// |          65,536 |   **2 MiB** |         |
     /// |       1,048,576 |  **32 MiB** |         |
     blocks_count: NonZeroU32,
+    /// Hashing function to use.
+    ///
+    /// Defaults to: [`HashFn::XxHash3_64`].
+    ///
+    /// Hashing functions selection may impact in terms of performance.
+    hash_fn: HashFn,
 }
 
 impl BloomOptions {
-    pub fn new(blocks_count: NonZeroU32) -> Self {
-        Self { blocks_count }
+    pub fn new(blocks_count: NonZeroU32, hash_fn: HashFn) -> Self {
+        Self {
+            blocks_count,
+            hash_fn,
+        }
     }
 
     pub fn blocks_count(&self) -> NonZeroU32 {
@@ -72,13 +97,56 @@ impl Default for BloomOptions {
         Self {
             blocks_count: NonZeroU32::new(DEFAULT_BLOCKS_COUNT)
                 .vortex_expect("valid nonzero u32 value"),
+            hash_fn: HashFn::XxHash3_64,
         }
     }
 }
 
 impl Display for BloomOptions {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "blocks={}", self.blocks_count)
+        write!(f, "blocks={}, hash_fn={}", self.blocks_count, self.hash_fn)
+    }
+}
+
+impl TryFrom<&[u8]> for BloomOptions {
+    type Error = VortexError;
+
+    fn try_from(bytes: &[u8]) -> VortexResult<Self> {
+        vortex_ensure_eq!(
+            bytes.len(),
+            OPTIONS_BYTES_LEN,
+            "invalid bloom metadata length"
+        );
+
+        // Both options are u32
+        let (chunks, left) = bytes.as_chunks::<4>();
+        vortex_ensure_eq!(left.len(), 0, "expected no chunks left");
+
+        let blocks_count = u32::from_le_bytes(chunks[0]);
+        let hash_fn = HashFn::try_from(u32::from_le_bytes(chunks[1]))?;
+
+        Ok(BloomOptions {
+            blocks_count: NonZeroU32::new(blocks_count)
+                .ok_or_else(|| vortex_err!("bloom blocks length must be non-zero"))?,
+            hash_fn,
+        })
+    }
+}
+
+impl From<&BloomOptions> for Vec<u8> {
+    fn from(options: &BloomOptions) -> Self {
+        let bytes: [u8; OPTIONS_BYTES_LEN] = options.into();
+        bytes.to_vec()
+    }
+}
+
+impl From<&BloomOptions> for [u8; OPTIONS_BYTES_LEN] {
+    fn from(options: &BloomOptions) -> Self {
+        let mut bytes = [0; OPTIONS_BYTES_LEN];
+        bytes[..size_of::<u32>()].copy_from_slice(&options.blocks_count.get().to_le_bytes());
+        bytes[size_of::<u32>()..].copy_from_slice(&(options.hash_fn as u32).to_le_bytes());
+
+        bytes
     }
 }
 
@@ -112,9 +180,7 @@ impl AggregateFnVTable for BloomFilter {
     }
 
     fn serialize(&self, options: &Self::Options) -> VortexResult<Option<Vec<u8>>> {
-        let blocks = options.blocks_count.get();
-        let metadata = blocks.to_le_bytes().to_vec();
-        Ok(Some(metadata))
+        Ok(Some(Vec::from(options)))
     }
 
     fn deserialize(
@@ -122,13 +188,7 @@ impl AggregateFnVTable for BloomFilter {
         metadata: &[u8],
         _session: &VortexSession,
     ) -> VortexResult<Self::Options> {
-        vortex_ensure_eq!(metadata.len(), 4, "invalid bloom metadata length");
-
-        let blocks = u32::from_le_bytes([metadata[0], metadata[1], metadata[2], metadata[3]]);
-
-        Ok(BloomOptions::new(NonZeroU32::new(blocks).ok_or_else(
-            || vortex_err!("bloom blocks length must be non-zero"),
-        )?))
+        BloomOptions::try_from(metadata)
     }
 
     /// Returns [Binary(Nullability::NonNullable)] when input [DType] is valid.
@@ -157,22 +217,15 @@ impl AggregateFnVTable for BloomFilter {
             return Ok(());
         }
 
-        let bytes = other
+        let other_as_bytes = other
             .as_binary()
             .value()
             .ok_or_else(|| vortex_err!("non-null bloom partial has no bytes"))?;
 
-        let other = BloomPartial::try_from(bytes.as_slice())?;
-
-        vortex_ensure_eq!(
-            partial.len(),
-            other.len(),
-            "bloom partial block count mismatch — partials built with different blocks_count"
-        );
-
-        partial.combine_with_other(&other);
-
-        Ok(())
+        // This assumes that `other` was created using the same hash function as
+        // `partial`. Ideally, an assertion here about which `hash_fn` was used to create `other`
+        // would catch this invariant.
+        partial.merge(other_as_bytes)
     }
 
     /// Returns the non-nullable binary representation of a bloom filter
@@ -235,6 +288,7 @@ pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
     use vortex_array::VortexSessionExecute;
     use vortex_array::aggregate_fn::Accumulator;
     use vortex_array::aggregate_fn::DynAccumulator;
+    use vortex_array::test_harness::check_metadata;
 
     use super::*;
 
@@ -289,7 +343,7 @@ pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
     #[test]
     fn combine_partials_rejects_mismatched_block_counts() -> VortexResult<()> {
         let mut smaller = BloomFilter.empty_partial(
-            &BloomOptions::new(NonZeroU32::new(4).unwrap()),
+            &BloomOptions::new(NonZeroU32::new(4).unwrap(), HashFn::XxHash3_64),
             &DType::Binary(Nullability::NonNullable),
         )?;
         let bigger = BloomFilter.empty_partial(
@@ -358,5 +412,54 @@ pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
         }
 
         Ok(())
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn test_bloom_metadata() {
+        // Using a fixed value rather than the defaults.
+        //
+        // Defaults may change, but that shouldn't affect
+        // how files are ser/de.
+        let options = &BloomOptions::new(
+            NonZeroU32::new(256).vortex_expect("valid nonzero"),
+            HashFn::XxHash3_64,
+        );
+        let bytes: [u8; OPTIONS_BYTES_LEN] = options.into();
+
+        check_metadata("bloom_filter_sbbf_xxhash3_64.metadata", &bytes);
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn test_bloom_metadata_variant() {
+        let options = &BloomOptions::new(
+            NonZeroU32::new(256).vortex_expect("valid nonzero"),
+            HashFn::XxHash64,
+        );
+        let bytes: [u8; OPTIONS_BYTES_LEN] = options.into();
+
+        check_metadata("bloom_filter_sbbf_xxhash64.metadata", &bytes);
+    }
+
+    #[test]
+    fn bloom_options_equality_compares_all_fields() {
+        let default = BloomOptions::default();
+        let same_as_default = BloomOptions::new(
+            NonZeroU32::new(DEFAULT_BLOCKS_COUNT).vortex_expect("valid nonzero"),
+            HashFn::XxHash3_64,
+        );
+        let different_block_count = BloomOptions::new(
+            NonZeroU32::new(4).vortex_expect("valid nonzero"),
+            HashFn::XxHash3_64,
+        );
+        let different_hash_fn = BloomOptions::new(
+            NonZeroU32::new(DEFAULT_BLOCKS_COUNT).vortex_expect("valid nonzero"),
+            HashFn::XxHash64,
+        );
+
+        assert_eq!(default, same_as_default);
+        assert_ne!(default, different_block_count);
+        assert_ne!(default, different_hash_fn);
     }
 }

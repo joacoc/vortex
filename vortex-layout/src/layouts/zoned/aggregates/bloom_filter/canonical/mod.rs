@@ -31,8 +31,7 @@ pub(super) fn accumulate_canonical(
         // Nulls are skipped and are not included in any Bloom filter.
         Canonical::Null(_) => {}
 
-        // TODO (joacoc): pending canonical
-        //
+        // TODO (joacoc): Pending canonicals
         // TODO (joacoc): Add decimal support once the logical and physical type
         // mismatch is resolved:
         // <https://github.com/vortex-data/vortex/issues/5820>

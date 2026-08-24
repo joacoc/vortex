@@ -17,6 +17,7 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use vortex_layout::layouts::zoned::aggregates::bloom_filter::BloomOptions;
 use vortex_layout::layouts::zoned::aggregates::bloom_filter::BloomPartial;
+use vortex_layout::layouts::zoned::aggregates::bloom_filter::HashFn;
 
 fn main() {
     divan::main();
@@ -31,7 +32,10 @@ const BLOCK_COUNTS: &[u32] = &[
 const VALUE_COUNT: usize = 8192;
 
 fn options(block_count: u32) -> BloomOptions {
-    BloomOptions::new(NonZeroU32::new(block_count).expect("benchmark block counts are non-zero"))
+    BloomOptions::new(
+        NonZeroU32::new(block_count).expect("benchmark block counts are non-zero"),
+        HashFn::XxHash3_64,
+    )
 }
 
 fn values(seed: u64) -> Vec<[u8; 16]> {

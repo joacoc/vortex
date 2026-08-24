@@ -57,6 +57,7 @@ vortex-utils = { workspace = true, features = ["dashmap"] }
 [dev-dependencies]
 divan = { workspace = true }
 futures = { workspace = true, features = ["executor"] }
+goldenfile = { workspace = true }
 insta = { workspace = true }
 rand = { workspace = true }
 rstest = { workspace = true }

@@ -9,16 +9,24 @@
 //!
 //! [Split block Bloom filters]: https://arxiv.org/pdf/2101.01719
 
+use std::fmt;
+use std::fmt::Display;
+use std::fmt::Formatter;
+
 use twox_hash::XxHash3_64;
+use twox_hash::XxHash64;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::PType;
 use vortex_array::dtype::ToBytes;
 use vortex_array::match_each_float_ptype;
 use vortex_array::match_each_integer_ptype;
 use vortex_array::scalar::Scalar;
+use vortex_error::VortexError;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
+#[cfg(test)]
 use vortex_error::vortex_ensure;
+use vortex_error::vortex_ensure_eq;
 use vortex_error::vortex_err;
 
 use super::BloomOptions;
@@ -29,9 +37,67 @@ const BYTES_PER_LANE: usize = size_of::<u32>(); // 4 bytes
 /// Block size (32 bytes [256 bits])
 pub(super) const BLOCK_SIZE: usize = LANES_PER_BLOCK * BYTES_PER_LANE;
 
+/// In the XXH family, the seed is optional and defaults to zero. Some crate
+/// APIs, such as [`XxHash64`], require it to be supplied explicitly.
+///
+/// See the [XXH specification](https://github.com/Cyan4973/xxHash/blob/v0.8.3/doc/xxhash_spec.md#step-1-initialize-internal-accumulators).
+const DEFAULT_SEED: u64 = 0;
+
+/// Hash function to use in a bloom filter.
+///
+/// The current options are fast, non-cryptographic xxHash variants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum HashFn {
+    XxHash3_64 = 0, // Default
+    XxHash64 = 1,
+}
+
+impl Display for HashFn {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::XxHash3_64 => "xxhash3_64",
+            Self::XxHash64 => "xxhash64",
+        })
+    }
+}
+
+impl HashFn {
+    /// Hashes the given bytes using the configured function.
+    ///
+    /// A match will pay a small branch cost in the hot path. A function pointer is
+    /// slower, though, and a generic would require choosing the hash function
+    /// at compile time (this is runtime configuration).
+    ///
+    /// There may be a way to move this match out of the hot path, but haven't
+    /// figured it out yet.
+    ///
+    /// Would call it hash but clashes with [Hash] macro.
+    #[inline]
+    fn hash_bytes(self, bytes: &[u8]) -> u64 {
+        match self {
+            Self::XxHash3_64 => XxHash3_64::oneshot(bytes),
+            Self::XxHash64 => XxHash64::oneshot(DEFAULT_SEED, bytes),
+        }
+    }
+}
+
+impl TryFrom<u32> for HashFn {
+    type Error = VortexError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::XxHash3_64),
+            1 => Ok(Self::XxHash64),
+            _ => Err(vortex_err!("unknown bloom hash function ID: {value}")),
+        }
+    }
+}
+
 /// Represents a Split block Bloom Filter filter for a single layout zone.
 pub struct BloomPartial {
     blocks: Vec<[u32; 8]>,
+    hash_fn: HashFn,
 }
 
 impl BloomPartial {
@@ -82,9 +148,7 @@ impl BloomPartial {
     where
         T: AsRef<[u8]>,
     {
-        // > Since the seed is optional, it can be 0.
-        // Ref: https://github.com/Cyan4973/xxHash/blob/v0.8.3/doc/xxhash_spec.md#step-1-initialize-internal-accumulators
-        XxHash3_64::oneshot_with_seed(0, value.as_ref())
+        self.hash_fn.hash_bytes(value.as_ref())
     }
 
     /// Returns the lower 32 bits of the hash used to construct the block mask.
@@ -174,13 +238,39 @@ impl BloomPartial {
         self.blocks.iter().all(|byte| *byte == [u32::MAX; 8])
     }
 
+    /// Merges a compatible serialized Bloom filter into this partial.
+    ///
+    /// The merge is a bitwise OR, which represents the union of two split-block
+    /// Bloom filters when they use the same block count.
+    ///
+    /// _Notice_ This method only validates the byte length.
+    /// Merging bytes from a filter created with a different hash function
+    /// will produce an invalid filter and introduce false negatives.
     #[inline]
-    pub(super) fn combine_with_other(&mut self, other: &BloomPartial) {
-        for (dst, src) in self.blocks.iter_mut().zip(other.blocks.iter()) {
-            for i in 0..8 {
-                dst[i] |= src[i];
+    pub(super) fn merge(&mut self, other: &[u8]) -> VortexResult<()> {
+        // Partial returns size in blocks,
+        // while bytes contains len in amount of bytes.
+        // So blocks * block_size (bytes) = total amount of bytes
+        vortex_ensure_eq!(
+            self.len() * BLOCK_SIZE,
+            other.len(),
+            "bloom partial block count mismatch"
+        );
+
+        for (dst_block, src_block) in self
+            .blocks
+            .iter_mut()
+            .zip(other.as_chunks::<BLOCK_SIZE>().0)
+        {
+            for (dst_lane, src_lane) in dst_block
+                .iter_mut()
+                .zip(src_block.as_chunks::<BYTES_PER_LANE>().0)
+            {
+                *dst_lane |= u32::from_le_bytes(*src_lane);
             }
         }
+
+        Ok(())
     }
 }
 
@@ -190,10 +280,7 @@ impl BloomPartial {
     /// Returns an error if the [Scalar] is invalid or its [DType] is unsupported.
     ///
     /// For example, `Scalar(Primitive(I32(54)))` is hashed as `hash(54)`.
-    pub(in crate::layouts::zoned) fn hash_valid_scalar(
-        &self,
-        scalar: &Scalar,
-    ) -> VortexResult<u64> {
+    pub fn hash_valid_scalar(&self, scalar: &Scalar) -> VortexResult<u64> {
         if scalar.is_null() {
             return Err(vortex_err!("cannot hash invalid scalars in bloom filter"));
         }
@@ -274,8 +361,8 @@ impl BloomPartial {
         Ok(())
     }
 
-    /// Given that primitives have the trait [ToBytes]
-    /// give them a better path.
+    /// A cleanear insert path for primitives that
+    /// have the trait [ToBytes].
     #[inline]
     pub(super) fn insert_primitive<T>(&mut self, value: &T)
     where
@@ -286,6 +373,8 @@ impl BloomPartial {
     }
 }
 
+// Useful convertion implementations for serialization
+// used in [`BloomPartial::to_scalar`]
 impl From<&BloomPartial> for Vec<u8> {
     fn from(val: &BloomPartial) -> Self {
         let mut bytes = Vec::with_capacity(val.len() * BLOCK_SIZE);
@@ -304,14 +393,35 @@ impl From<&BloomOptions> for BloomPartial {
     fn from(options: &BloomOptions) -> Self {
         Self {
             blocks: vec![[0u32; 8]; options.blocks_count.get() as usize],
+            hash_fn: options.hash_fn,
         }
     }
 }
 
-impl TryFrom<&[u8]> for BloomPartial {
-    type Error = vortex_error::VortexError;
+impl PartialEq for BloomPartial {
+    fn eq(&self, other: &Self) -> bool {
+        // Even if two partials have the same blocks,
+        // a different hash function means they represent
+        // different sets of values.
+        self.blocks == other.blocks && self.hash_fn == other.hash_fn
+    }
+}
 
-    /// Reconstruct a partial from its serialized byte representation
+#[cfg(test)]
+impl From<Vec<[u32; 8]>> for BloomPartial {
+    fn from(value: Vec<[u32; 8]>) -> Self {
+        BloomPartial {
+            blocks: value,
+            hash_fn: HashFn::XxHash3_64,
+        }
+    }
+}
+
+#[cfg(test)]
+impl TryFrom<&[u8]> for BloomPartial {
+    type Error = VortexError;
+
+    /// Reconstructs a partial from its serialized byte representation
     /// (the same layout produced by `to_scalar`).
     fn try_from(bytes: &[u8]) -> VortexResult<Self> {
         vortex_ensure!(
@@ -345,22 +455,10 @@ impl TryFrom<&[u8]> for BloomPartial {
             "bloom blocks length must be non-zero and lower than u32::MAX",
         );
 
-        Ok(BloomPartial { blocks })
-    }
-}
-
-/// Same as derive but keeping it separated
-/// in case in the future more properties are added.
-impl PartialEq for BloomPartial {
-    fn eq(&self, other: &Self) -> bool {
-        self.blocks == other.blocks
-    }
-}
-
-#[cfg(test)]
-impl From<Vec<[u32; 8]>> for BloomPartial {
-    fn from(value: Vec<[u32; 8]>) -> Self {
-        BloomPartial { blocks: value }
+        Ok(BloomPartial {
+            blocks,
+            hash_fn: HashFn::XxHash3_64,
+        })
     }
 }
 
@@ -368,11 +466,28 @@ impl From<Vec<[u32; 8]>> for BloomPartial {
 mod tests {
     use std::num::NonZeroU32;
 
+    use rstest::rstest;
     use vortex_array::dtype::ToBytes;
 
     use crate::layouts::zoned::aggregates::bloom_filter::BloomOptions;
     use crate::layouts::zoned::aggregates::bloom_filter::BloomPartial;
     use crate::layouts::zoned::aggregates::bloom_filter::DEFAULT_BLOCKS_COUNT;
+    use crate::layouts::zoned::aggregates::bloom_filter::HashFn;
+
+    #[test]
+    fn equality_includes_hash_function() {
+        let blocks = vec![[0u32; 8]];
+        let xxhash3 = BloomPartial {
+            blocks: blocks.clone(),
+            hash_fn: HashFn::XxHash3_64,
+        };
+        let xxhash64 = BloomPartial {
+            blocks,
+            hash_fn: HashFn::XxHash64,
+        };
+
+        assert!(xxhash3 != xxhash64);
+    }
 
     #[test]
     fn bigger_filter_size() {
@@ -389,6 +504,7 @@ mod tests {
         // could trigger this assertion, like a kind of smoke test.
         let options = BloomOptions::new(
             NonZeroU32::new(DEFAULT_BLOCKS_COUNT * 1000).expect("valid nonzero u32"),
+            HashFn::XxHash3_64,
         );
         let mut bloom_filter = BloomPartial::from(&options);
 
@@ -448,5 +564,23 @@ mod tests {
         let invalid_filter = BloomPartial::try_from(bytes.as_slice());
 
         assert!(invalid_filter.is_err(), "expect filter to be invalid");
+    }
+
+    // Similar to the goldenfile tests, but for hash functions.
+    //
+    // Useful compatibility test to catch an accidental hash-algorithm or seed change.
+    #[rstest]
+    #[case(HashFn::XxHash3_64, 16649171463689419262)]
+    #[case(HashFn::XxHash64, 631098470869724288)]
+    fn hash_output_is_stable(#[case] hash_fn: HashFn, #[case] expected: u64) {
+        let mut bloom_filter = BloomPartial::from(&BloomOptions::new(
+            NonZeroU32::new(256).expect("valid non-zero"),
+            hash_fn,
+        ));
+        assert_eq!(bloom_filter.hash(b"vortex"), expected);
+
+        // Additional check
+        bloom_filter.insert(b"vortex");
+        assert!(bloom_filter.contains(b"vortex"));
     }
 }
