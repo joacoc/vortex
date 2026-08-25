@@ -175,7 +175,7 @@ impl AggregateFnVTable for BloomFilter {
     type Partial = BloomPartial;
 
     fn id(&self) -> AggregateFnId {
-        static ID: CachedId = CachedId::new("vortex.bloom_filter.v1");
+        static ID: CachedId = CachedId::new("vortex.bloom_filter.sbbf");
         *ID
     }
 
