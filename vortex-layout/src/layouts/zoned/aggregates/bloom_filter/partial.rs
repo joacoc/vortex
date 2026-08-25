@@ -3,9 +3,12 @@
 
 //! Split block Bloom filters (SBBF) implementation for Vortex.
 //!
-//! This implementation follows the original paper, renaming `bucket` to `block`,
-//! with small changes that help the Rust compiler generate optimized, vectorized
-//! code for `make_mask`, `add_hash`, and `find_hash`.
+//! This implementation follows the original paper but
+//! with the following noticeable changes:
+//! - Renaming `bucket` to `block`,
+//! - Small changes that help the Rust compiler generate optimized, vectorized
+//!   code for `make_mask`, `add_hash`, and `find_hash`
+//! - A different salt order.
 //!
 //! [Split block Bloom filters]: https://arxiv.org/pdf/2101.01719
 
@@ -42,6 +45,20 @@ pub(super) const BLOCK_SIZE: usize = LANES_PER_BLOCK * BYTES_PER_LANE;
 ///
 /// See the [XXH specification](https://github.com/Cyan4973/xxHash/blob/v0.8.3/doc/xxhash_spec.md#step-1-initialize-internal-accumulators).
 const DEFAULT_SEED: u64 = 0;
+
+/// Eight odd constants for multiply-shift hashing.
+///
+/// They fit in one 256-bit SIMD vector, and the order matches the one
+/// used by the Apache Parquet specification. The paper's example uses
+/// the same values but in a different order. This was not
+/// intentional for having compatibility with Apache Parquet, but remains
+/// as a common-order in implementations.
+///
+/// It is important to notice that while order doesn't affect validity,
+/// it changes the final bits set in each lane.
+const SALT: [u32; 8] = [
+    0x47b6137b, 0x44974d91, 0x8824ad5b, 0xa2b7289d, 0x705495c7, 0x2df1424b, 0x9efc4947, 0x5c6bfb31,
+];
 
 /// Hash function to use in a bloom filter.
 ///
@@ -94,7 +111,7 @@ impl TryFrom<u32> for HashFn {
     }
 }
 
-/// Represents a Split block Bloom Filter filter for a single layout zone.
+/// Represents a Split block Bloom Filter for a single layout zone.
 pub struct BloomPartial {
     blocks: Vec<[u32; 8]>,
     hash_fn: HashFn,
@@ -195,16 +212,10 @@ impl BloomPartial {
     fn make_mask(&self, hash: u32) -> [u32; 8] {
         let mut out = [0u32; 8];
 
-        // Set eight odd constants for multiply-shift hashing
-        let rehash: [u32; 8] = [
-            0x47b6137b, 0x44974d91, 0x8824ad5b, 0xa2b7289d, 0x705495c7, 0x2df1424b, 0x9efc4947,
-            0x5c6bfb31,
-        ];
-
         for i in 0..8 {
             // Shift all data right, reducing the hash values from 32 bits to five bits.
             // Those five bits represent an index in [0, 31)
-            let y = hash.wrapping_mul(rehash[i]) >> 27;
+            let y = hash.wrapping_mul(SALT[i]) >> 27;
 
             // Set a bit in each lane based on using the [0, 32) data as shift values.
             out[i] = 1u32 << y;
@@ -564,6 +575,38 @@ mod tests {
         let invalid_filter = BloomPartial::try_from(bytes.as_slice());
 
         assert!(invalid_filter.is_err(), "expect filter to be invalid");
+    }
+
+    /// Another regression test for bloom serialization,
+    /// but in this case to detect mask salt changes.
+    /// It just verifies that a filter's serialized representation remains stable.
+    #[test]
+    fn serialized_bits_are_stable() {
+        let options = BloomOptions::new(NonZeroU32::MIN, HashFn::XxHash3_64);
+        let mut bloom_filter = BloomPartial::from(&options);
+
+        bloom_filter.insert(b"vortex");
+
+        // Because we have only one block, and  this is the only value inserted,
+        // these lanes equal its mask: `empty | mask == mask`.
+        let expected_lanes: [u32; 8] = [
+            0x0000_1000,
+            0x0200_0000,
+            0x0000_2000,
+            0x0800_0000,
+            0x0200_0000,
+            0x0000_0040,
+            0x0000_4000,
+            0x0000_1000,
+        ];
+
+        let expected_bytes: Vec<u8> = expected_lanes
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+
+        let bytes: Vec<u8> = (&bloom_filter).into();
+        assert_eq!(bytes, expected_bytes);
     }
 
     // Similar to the goldenfile tests, but for hash functions.
