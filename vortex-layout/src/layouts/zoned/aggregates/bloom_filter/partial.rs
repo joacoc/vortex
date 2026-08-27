@@ -17,7 +17,6 @@ use std::fmt::Display;
 use std::fmt::Formatter;
 
 use twox_hash::XxHash3_64;
-use twox_hash::XxHash64;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::PType;
 use vortex_array::dtype::ToBytes;
@@ -34,17 +33,11 @@ use vortex_error::vortex_err;
 
 use super::BloomOptions;
 
-const LANES_PER_BLOCK: usize = 8;
-const BYTES_PER_LANE: usize = size_of::<u32>(); // 4 bytes
+const SPLITS_PER_BLOCK: usize = 8;
+const BYTES_PER_SPLIT: usize = size_of::<u32>(); // 4 bytes
 
 /// Block size (32 bytes [256 bits])
-pub(super) const BLOCK_SIZE: usize = LANES_PER_BLOCK * BYTES_PER_LANE;
-
-/// In the XXH family, the seed is optional and defaults to zero. Some crate
-/// APIs, such as [`XxHash64`], require it to be supplied explicitly.
-///
-/// See the [XXH specification](https://github.com/Cyan4973/xxHash/blob/v0.8.3/doc/xxhash_spec.md#step-1-initialize-internal-accumulators).
-const DEFAULT_SEED: u64 = 0;
+pub(super) const BLOCK_SIZE: usize = SPLITS_PER_BLOCK * BYTES_PER_SPLIT;
 
 /// Eight odd constants for multiply-shift hashing.
 ///
@@ -55,47 +48,28 @@ const DEFAULT_SEED: u64 = 0;
 /// as a common-order in implementations.
 ///
 /// It is important to notice that while order doesn't affect validity,
-/// it changes the final bits set in each lane.
+/// it changes the final bits set in each split/lane.
 const SALT: [u32; 8] = [
     0x47b6137b, 0x44974d91, 0x8824ad5b, 0xa2b7289d, 0x705495c7, 0x2df1424b, 0x9efc4947, 0x5c6bfb31,
 ];
 
 /// Hash function to use in a bloom filter.
 ///
-/// The current options are fast, non-cryptographic xxHash variants.
+/// The only supported hash function is XXH3 64-bit.
+///
+/// The serialized options retain a hash-function identifier
+/// so future variants can be added without changing the metadata layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum HashFn {
     XxHash3_64 = 0, // Default
-    XxHash64 = 1,
 }
 
 impl Display for HashFn {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::XxHash3_64 => "xxhash3_64",
-            Self::XxHash64 => "xxhash64",
         })
-    }
-}
-
-impl HashFn {
-    /// Hashes the given bytes using the configured function.
-    ///
-    /// A match will pay a small branch cost in the hot path. A function pointer is
-    /// slower, though, and a generic would require choosing the hash function
-    /// at compile time (this is runtime configuration).
-    ///
-    /// There may be a way to move this match out of the hot path, but haven't
-    /// figured it out yet.
-    ///
-    /// Would call it hash but clashes with [Hash] macro.
-    #[inline]
-    fn hash_bytes(self, bytes: &[u8]) -> u64 {
-        match self {
-            Self::XxHash3_64 => XxHash3_64::oneshot(bytes),
-            Self::XxHash64 => XxHash64::oneshot(DEFAULT_SEED, bytes),
-        }
     }
 }
 
@@ -105,13 +79,34 @@ impl TryFrom<u32> for HashFn {
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(Self::XxHash3_64),
-            1 => Ok(Self::XxHash64),
             _ => Err(vortex_err!("unknown bloom hash function ID: {value}")),
         }
     }
 }
 
 /// Represents a Split block Bloom Filter for a single layout zone.
+///
+/// Usage example:
+///
+/// ```rust
+/// use vortex_array::dtype::{DType, Nullability};
+/// use vortex_layout::layouts::zoned::aggregates::bloom_filter::{BloomFilter, BloomOptions};
+/// use vortex_array::aggregate_fn::AggregateFnVTable;
+///
+/// let filter = BloomFilter {};
+/// let mut zone = filter
+///     .empty_partial(
+///         &BloomOptions::default(),
+///         &DType::Binary(Nullability::NonNullable),
+///     )
+///     .expect("valid partial");
+///
+/// zone.insert(b"Denmark");
+///
+/// assert_eq!(zone.contains(b"Denmark"), true);
+/// assert_eq!(zone.contains(b"Japan"), false);
+/// assert_eq!(zone.contains(b"Brazil"), false);
+/// ```
 pub struct BloomPartial {
     blocks: Vec<[u32; 8]>,
     hash_fn: HashFn,
@@ -126,17 +121,14 @@ impl BloomPartial {
         self.blocks.len()
     }
 
+    /// Inserts a value expressed in bytes into
+    /// the filter.
     #[inline]
     pub fn insert<T>(&mut self, value: T)
     where
         T: AsRef<[u8]>,
     {
         let hash = self.hash(value);
-        self.insert_hash(hash);
-    }
-
-    #[inline]
-    fn insert_hash(&mut self, hash: u64) {
         self.add_hash(hash);
     }
 
@@ -165,7 +157,7 @@ impl BloomPartial {
     where
         T: AsRef<[u8]>,
     {
-        self.hash_fn.hash_bytes(value.as_ref())
+        XxHash3_64::oneshot(value.as_ref())
     }
 
     /// Returns the lower 32 bits of the hash used to construct the block mask.
@@ -178,12 +170,15 @@ impl BloomPartial {
         hash as u32
     }
 
+    /// Adds a hash into a single block of the bloom filter.
     fn add_hash(&mut self, hash: u64) {
+        // 1. Use the upper 32 bits from the hash value to select a block.
         let block_idx = self.block_index(hash, self.blocks.len());
+
+        // 2. Use the lower 32 bits to construct a mask.
         let mask = self.make_mask(self.lower_hash_bits(hash));
 
-        // The original solution uses _mm256_sllv_epi32
-        // or the mask into the existing block
+        // 3. Apply the mask to the block selected in step 1.
         for i in 0..8 {
             self.blocks[block_idx][i] |= mask[i];
         }
@@ -239,11 +234,14 @@ impl BloomPartial {
 
 /// Practical implementation to avoid having to share blocks
 impl BloomPartial {
+    /// Resets and empties all blocks.
     #[inline]
     pub(super) fn reset(&mut self) {
         self.blocks.fill([0; 8]);
     }
 
+    /// Returns true if all the blocks are saturated, in other words,
+    /// all bits are `1`.
     #[inline]
     pub(super) fn is_saturated(&self) -> bool {
         self.blocks.iter().all(|byte| *byte == [u32::MAX; 8])
@@ -273,11 +271,11 @@ impl BloomPartial {
             .iter_mut()
             .zip(other.as_chunks::<BLOCK_SIZE>().0)
         {
-            for (dst_lane, src_lane) in dst_block
+            for (dst_split, src_split) in dst_block
                 .iter_mut()
-                .zip(src_block.as_chunks::<BYTES_PER_LANE>().0)
+                .zip(src_block.as_chunks::<BYTES_PER_SPLIT>().0)
             {
-                *dst_lane |= u32::from_le_bytes(*src_lane);
+                *dst_split |= u32::from_le_bytes(*src_split);
             }
         }
 
@@ -367,12 +365,12 @@ impl BloomPartial {
         scalar: &Scalar,
     ) -> VortexResult<()> {
         let hash = self.hash_valid_scalar(scalar)?;
-        self.insert_hash(hash);
+        self.add_hash(hash);
 
         Ok(())
     }
 
-    /// A cleanear insert path for primitives that
+    /// A cleaner insert path for primitives that
     /// have the trait [ToBytes].
     #[inline]
     pub(super) fn insert_primitive<T>(&mut self, value: &T)
@@ -380,11 +378,11 @@ impl BloomPartial {
         T: ToBytes,
     {
         let hash = self.hash(value.to_le_bytes());
-        self.insert_hash(hash);
+        self.add_hash(hash);
     }
 }
 
-// Useful convertion implementations for serialization
+// Useful conversion implementations for serialization
 // used in [`BloomPartial::to_scalar`]
 impl From<&BloomPartial> for Vec<u8> {
     fn from(val: &BloomPartial) -> Self {
@@ -400,6 +398,8 @@ impl From<&BloomPartial> for Vec<u8> {
     }
 }
 
+/// Useful conversion used mostly for tests, and to
+/// start an empty partial from [`super::BloomFilter`].
 impl From<&BloomOptions> for BloomPartial {
     fn from(options: &BloomOptions) -> Self {
         Self {
@@ -411,9 +411,11 @@ impl From<&BloomOptions> for BloomPartial {
 
 impl PartialEq for BloomPartial {
     fn eq(&self, other: &Self) -> bool {
-        // Even if two partials have the same blocks,
-        // a different hash function means they represent
-        // different sets of values.
+        // Currently, the Bloom filter only supports one hash function,
+        // so two partials with the same blocks are equal.
+        // If the filter supports more hash functions in the future,
+        // this would no longer be true, because the same blocks could represent
+        // different values.
         self.blocks == other.blocks && self.hash_fn == other.hash_fn
     }
 }
@@ -423,7 +425,7 @@ impl From<Vec<[u32; 8]>> for BloomPartial {
     fn from(value: Vec<[u32; 8]>) -> Self {
         BloomPartial {
             blocks: value,
-            hash_fn: HashFn::XxHash3_64,
+            hash_fn: HashFn::XxHash3_64, // Default. Only used for tests.
         }
     }
 }
@@ -446,15 +448,15 @@ impl TryFrom<&[u8]> for BloomPartial {
             .0
             .iter()
             .map(|chunk| {
-                let (lane_bytes, remainder) = chunk.as_chunks::<BYTES_PER_LANE>();
+                let (split_bytes, remainder) = chunk.as_chunks::<BYTES_PER_SPLIT>();
                 let mut block = [0u32; 8];
                 vortex_ensure!(
                     remainder.is_empty(),
                     "invalid bloom filter, unexpected remainder bytes"
                 );
 
-                for (lane, lane_bytes) in block.iter_mut().zip(lane_bytes) {
-                    *lane = u32::from_le_bytes(*lane_bytes);
+                for (split, split_bytes) in block.iter_mut().zip(split_bytes) {
+                    *split = u32::from_le_bytes(*split_bytes);
                 }
 
                 Ok(block)
@@ -468,7 +470,7 @@ impl TryFrom<&[u8]> for BloomPartial {
 
         Ok(BloomPartial {
             blocks,
-            hash_fn: HashFn::XxHash3_64,
+            hash_fn: HashFn::XxHash3_64, // Default. Only used for tests.
         })
     }
 }
@@ -484,21 +486,6 @@ mod tests {
     use crate::layouts::zoned::aggregates::bloom_filter::BloomPartial;
     use crate::layouts::zoned::aggregates::bloom_filter::DEFAULT_BLOCKS_COUNT;
     use crate::layouts::zoned::aggregates::bloom_filter::HashFn;
-
-    #[test]
-    fn equality_includes_hash_function() {
-        let blocks = vec![[0u32; 8]];
-        let xxhash3 = BloomPartial {
-            blocks: blocks.clone(),
-            hash_fn: HashFn::XxHash3_64,
-        };
-        let xxhash64 = BloomPartial {
-            blocks,
-            hash_fn: HashFn::XxHash64,
-        };
-
-        assert!(xxhash3 != xxhash64);
-    }
 
     #[test]
     fn bigger_filter_size() {
@@ -587,9 +574,9 @@ mod tests {
 
         bloom_filter.insert(b"vortex");
 
-        // Because we have only one block, and  this is the only value inserted,
-        // these lanes equal its mask: `empty | mask == mask`.
-        let expected_lanes: [u32; 8] = [
+        // Because we have only one block and this is the only value inserted,
+        // these splits are equal to its mask: `empty | mask == mask`.
+        let expected_splits: [u32; 8] = [
             0x0000_1000,
             0x0200_0000,
             0x0000_2000,
@@ -600,7 +587,7 @@ mod tests {
             0x0000_1000,
         ];
 
-        let expected_bytes: Vec<u8> = expected_lanes
+        let expected_bytes: Vec<u8> = expected_splits
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect();
@@ -614,7 +601,6 @@ mod tests {
     // Useful compatibility test to catch an accidental hash-algorithm or seed change.
     #[rstest]
     #[case(HashFn::XxHash3_64, 16649171463689419262)]
-    #[case(HashFn::XxHash64, 631098470869724288)]
     fn hash_output_is_stable(#[case] hash_fn: HashFn, #[case] expected: u64) {
         let mut bloom_filter = BloomPartial::from(&BloomOptions::new(
             NonZeroU32::new(256).expect("valid non-zero"),

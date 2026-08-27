@@ -74,8 +74,6 @@ pub struct BloomOptions {
     /// Hashing function to use.
     ///
     /// Defaults to: [`HashFn::XxHash3_64`].
-    ///
-    /// Hashing functions selection may impact in terms of performance.
     hash_fn: HashFn,
 }
 
@@ -108,6 +106,7 @@ impl Display for BloomOptions {
     }
 }
 
+/// Deserializes [`BloomOptions`] from the layout binary representation.
 impl TryFrom<&[u8]> for BloomOptions {
     type Error = VortexError;
 
@@ -133,6 +132,8 @@ impl TryFrom<&[u8]> for BloomOptions {
     }
 }
 
+/// Useful implementation for serialization,
+/// to avoid the need to carry the serialized length.
 impl From<&BloomOptions> for Vec<u8> {
     fn from(options: &BloomOptions) -> Self {
         let bytes: [u8; OPTIONS_BYTES_LEN] = options.into();
@@ -140,6 +141,9 @@ impl From<&BloomOptions> for Vec<u8> {
     }
 }
 
+/// Serialization implementation for [BloomOptions]
+///
+/// The following bytes are the ones stored in the zone layout metadata.
 impl From<&BloomOptions> for [u8; OPTIONS_BYTES_LEN] {
     fn from(options: &BloomOptions) -> Self {
         let mut bytes = [0; OPTIONS_BYTES_LEN];
@@ -151,18 +155,119 @@ impl From<&BloomOptions> for [u8; OPTIONS_BYTES_LEN] {
 }
 
 /// A Bloom filter is an approximate membership query structure.
-/// In Vortex layouts, it helps determine if a value is present in a zone or not.
+/// In Vortex layouts, it helps determine if a value is probably
+/// present in a single-column zone.
 ///
-/// Because membership is approximate, the filter can produce false positives.
-/// Their probability depends on the number of distinct values in the zone and
-/// the filter configuration.
+/// Because membership is approximate, the filter can produce false positives
+/// but never false negatives. In other words, it can report that
+/// an absent value is present in a zone, but it never excludes a zone containing the value.
+/// The false-positive probability depends on the number of distinct values
+/// and the filter configuration.
 ///
 /// ### Implementation
 ///
-/// This implementation uses a Split block Bloom Filter (SBBF), a Bloom filter
-/// variant designed to take advantage of SIMD instructions and parallelism.
+/// Implementation is based on the Split block Bloom Filter (SBBF),
+/// a Bloom filter variant that is cache-friendly and takes advantage of SIMD.
+/// As a tradeoff, it is less space-efficient than a traditional Bloom filter.
 ///
-/// Refer to [BloomPartial] for the implementation code.
+/// The filter is made up of 256-bit blocks, where each block "splits" into eight sections.
+/// When a zone writer inserts a value, the value gets hashed and assigned to a block.
+/// And then a mask derived from the hash and applied to the assigned block.
+/// For more details about the process, see [Insertion](#insertion) for how a block
+/// is selected and updated. For the actual implementation code, refer to [BloomPartial].
+///
+/// ### Representation
+///
+/// The internal state is represented as `blocks: Vec<[u32; 8]>`, with each block
+/// containing its eight splits/sections.
+///
+/// An empty filter looks as follows:
+///
+/// ```text
+/// ┌──────────────────┬─────┬──────────────────────┐
+/// │ block 0 [u32; 8] │ ... │ block N -1 [u32; 8]  │
+/// ├──────────────────┼─────┼──────────────────────┤
+/// │ 00000...00000    │ ... │ 00000...00000        │
+/// └──────────────────┴─────┴──────────────────────┘
+/// ```
+///
+/// If we zoom in on a particular block it would look like this:
+///
+/// ```text
+/// ┌────────────────┬─────┬────────────────┐
+/// │ split 0 [u32]  │ ... │ split 7 [u32]  │
+/// ├────────────────┼─────┼────────────────┤
+/// │ 00000...00000  │ ... │ 00000...00000  │
+/// └────────────────┴─────┴────────────────┘
+/// ```
+///
+/// ### Insertion
+///
+/// During insertion, the value to insert gets hashed into a 64-bit value.
+/// From the resulting hash, the upper 32 bits are used to select a block,
+/// while the lower 32 bits are used to create the mask.
+///
+/// ```text
+///                    hash [u64]
+///            10100...11000_00011...11011
+///                         │
+///                         ▼
+///          ┌────────────────┬────────────────┐
+///          │ upper [u32]    │ lower [u32]    │
+///          ├────────────────┼────────────────┤
+///          │ 10100...11000  │ 00011...11011  │
+///          └───────┬────────┴───────┬────────┘
+///                  │                │
+///                  ▼                ▼
+///          block_index(upper)  make_mask(lower)
+///                  │                │
+///                  ▼                ▼
+///          block_idx [usize]   mask [u32; 8]
+/// ```
+///
+/// The mask has the same structure as a block, but with one bit set for
+/// each of its eight splits.
+///
+/// The following action is to OR the mask and block together, turning those bits on
+/// without changing any bits that were already set:
+///
+/// `block = block OR mask`
+///
+/// And this is how the updated block fits back into the filter:
+///
+/// ```text
+/// ┌────────────────┬─────┬────────────────┐
+/// │ split 0 [u32]  │ ... │ split 7 [u32]  │
+/// ├────────────────┼─────┼────────────────┤
+/// │ 10000...00000  │ ... │ 00000...00100  │
+/// └────────────────┴─────┴────────────────┘
+/// ```
+///
+/// Bloom filter block visualised (splits flattened):
+///
+/// ```text
+/// ┌─────┬────────────────────────────────┬─────┐
+/// │ ... │ block 4                        │ ... │
+/// ├─────┼────────────────────────────────┼─────┤
+/// │ ... │ 10000...00100                  │ ... │
+/// └─────┴────────────────────────────────┴─────┘
+/// ```
+///
+/// ### Serialization
+///
+/// Serialization is simple, it is just flattening the blocks `Vec<[u32; 8]>`
+/// into `Vec<u8>`. So the only difference is that the blocks boundaries
+/// are now implicit, while the bits remain the same.
+///
+/// To deserialize, it is just enough to split the byte sequence into 32-byte blocks.
+///
+/// ```text
+/// ┌────────────────────────┬─────┬────────────────────────────────┐
+/// │ bytes 0..32            │ ... │ bytes (N - 1) * 32..N * 32     │
+/// ├────────────────────────┼─────┼────────────────────────────────┤
+/// │ block 0: 8 x u32 (LE)  │ ... │ block N - 1                    │
+/// └────────────────────────┴─────┴────────────────────────────────┘
+/// ```
 ///
 /// ### Notice
 ///
@@ -241,6 +346,8 @@ impl AggregateFnVTable for BloomFilter {
     }
 
     /// Returns true if all the blocks are full.
+    ///
+    /// When a bloom filter is saturated, it cannot rule out any values.
     fn is_saturated(&self, partial: &Self::Partial) -> bool {
         partial.is_saturated()
     }
@@ -430,18 +537,6 @@ pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
         check_metadata("bloom_filter_sbbf_xxhash3_64.metadata", &bytes);
     }
 
-    #[cfg_attr(miri, ignore)]
-    #[test]
-    fn test_bloom_metadata_variant() {
-        let options = &BloomOptions::new(
-            NonZeroU32::new(256).vortex_expect("valid nonzero"),
-            HashFn::XxHash64,
-        );
-        let bytes: [u8; OPTIONS_BYTES_LEN] = options.into();
-
-        check_metadata("bloom_filter_sbbf_xxhash64.metadata", &bytes);
-    }
-
     #[test]
     fn bloom_options_equality_compares_all_fields() {
         let default = BloomOptions::default();
@@ -453,13 +548,8 @@ pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
             NonZeroU32::new(4).vortex_expect("valid nonzero"),
             HashFn::XxHash3_64,
         );
-        let different_hash_fn = BloomOptions::new(
-            NonZeroU32::new(DEFAULT_BLOCKS_COUNT).vortex_expect("valid nonzero"),
-            HashFn::XxHash64,
-        );
 
         assert_eq!(default, same_as_default);
         assert_ne!(default, different_block_count);
-        assert_ne!(default, different_hash_fn);
     }
 }
