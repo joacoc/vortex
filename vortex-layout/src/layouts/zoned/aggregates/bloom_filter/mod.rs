@@ -297,12 +297,6 @@ impl AggregateFnVTable for BloomFilter {
     }
 
     /// Returns [Binary(Nullability::NonNullable)] when input [DType] is valid.
-    ///
-    /// The [BloomFilter] is serialized/deserialized as a sequence of bytes
-    /// that represents the filter state.
-    ///
-    /// An empty filter rather than being NULL is represented
-    /// by a zero-initialized byte sequence (`0x0..0`)
     fn return_dtype(&self, _options: &Self::Options, input_dtype: &DType) -> Option<DType> {
         is_bloom_valid_dtype(input_dtype).then_some(DType::Binary(Nullability::NonNullable))
     }
