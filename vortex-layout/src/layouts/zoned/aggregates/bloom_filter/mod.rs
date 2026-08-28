@@ -100,6 +100,7 @@ impl BloomOptions {
             "invalid bloom metadata length"
         );
 
+        // Both options are u32
         let (chunks, remainder) = bytes.as_chunks::<4>();
         vortex_ensure_eq!(remainder.len(), 0, "expected no trailing metadata bytes");
 
@@ -369,6 +370,7 @@ pub(super) fn is_bloom_valid_dtype(dtype: &DType) -> bool {
 // The following functions are utils/useful for tests in canonical and constants.
 #[cfg(test)]
 pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
+    use rstest::rstest;
     use vortex_array::IntoArray;
     use vortex_array::VortexSessionExecute;
     use vortex_array::aggregate_fn::Accumulator;
@@ -542,5 +544,20 @@ pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
 
         assert_eq!(BloomOptions::deserialize(&options.serialize())?, options);
         Ok(())
+    }
+
+    #[rstest]
+    #[case::empty(&[])]
+    #[case::invalid_len_too_short(&[0; OPTIONS_BYTES_LEN - 1])]
+    #[case::invalid_zero_blocks(&[0_u8; OPTIONS_BYTES_LEN])]
+    #[case::unknown_hash_fn(&[
+        1_u32.to_le_bytes(), // `blocks_count` = 1
+        1_u32.to_le_bytes() // `HashFn` = 1 (doesn't exist)
+    ].concat())]
+    fn invalid_options_error(#[case] bytes: &[u8]) {
+        assert!(
+            BloomOptions::deserialize(bytes).is_err(),
+            "expected invalid metadata to return an error: {bytes:?}"
+        );
     }
 }
