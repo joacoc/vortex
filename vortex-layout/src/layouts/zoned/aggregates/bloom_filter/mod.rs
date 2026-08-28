@@ -21,7 +21,6 @@ use vortex_array::aggregate_fn::AggregateFnVTable;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::Nullability;
 use vortex_array::scalar::Scalar;
-use vortex_error::VortexError;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure_eq;
@@ -92,6 +91,35 @@ impl BloomOptions {
     pub fn blocks_count(&self) -> NonZeroU32 {
         self.blocks_count
     }
+
+    /// Deserialize options from their layout metadata representation.
+    pub(in crate::layouts::zoned) fn deserialize(bytes: &[u8]) -> VortexResult<Self> {
+        vortex_ensure_eq!(
+            bytes.len(),
+            OPTIONS_BYTES_LEN,
+            "invalid bloom metadata length"
+        );
+
+        let (chunks, remainder) = bytes.as_chunks::<4>();
+        vortex_ensure_eq!(remainder.len(), 0, "expected no trailing metadata bytes");
+
+        let blocks_count = u32::from_le_bytes(chunks[0]);
+        let hash_fn = HashFn::try_from(u32::from_le_bytes(chunks[1]))?;
+
+        Ok(Self {
+            blocks_count: NonZeroU32::new(blocks_count)
+                .ok_or_else(|| vortex_err!("bloom blocks length must be non-zero"))?,
+            hash_fn,
+        })
+    }
+
+    /// Serialize options into their layout metadata representation.
+    pub(in crate::layouts::zoned) fn serialize(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(OPTIONS_BYTES_LEN);
+        bytes.extend(self.blocks_count.get().to_le_bytes());
+        bytes.extend((self.hash_fn as u32).to_le_bytes());
+        bytes
+    }
 }
 
 impl Default for BloomOptions {
@@ -107,54 +135,6 @@ impl Default for BloomOptions {
 impl Display for BloomOptions {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "blocks={}, hash_fn={}", self.blocks_count, self.hash_fn)
-    }
-}
-
-/// Deserializes [`BloomOptions`] from the layout binary representation.
-impl TryFrom<&[u8]> for BloomOptions {
-    type Error = VortexError;
-
-    fn try_from(bytes: &[u8]) -> VortexResult<Self> {
-        vortex_ensure_eq!(
-            bytes.len(),
-            OPTIONS_BYTES_LEN,
-            "invalid bloom metadata length"
-        );
-
-        // Both options are u32
-        let (chunks, left) = bytes.as_chunks::<4>();
-        vortex_ensure_eq!(left.len(), 0, "expected no chunks left");
-
-        let blocks_count = u32::from_le_bytes(chunks[0]);
-        let hash_fn = HashFn::try_from(u32::from_le_bytes(chunks[1]))?;
-
-        Ok(BloomOptions {
-            blocks_count: NonZeroU32::new(blocks_count)
-                .ok_or_else(|| vortex_err!("bloom blocks length must be non-zero"))?,
-            hash_fn,
-        })
-    }
-}
-
-/// Useful implementation for serialization,
-/// to avoid the need to carry the serialized length.
-impl From<&BloomOptions> for Vec<u8> {
-    fn from(options: &BloomOptions) -> Self {
-        let bytes: [u8; OPTIONS_BYTES_LEN] = options.into();
-        bytes.to_vec()
-    }
-}
-
-/// Serialization implementation for [BloomOptions]
-///
-/// The following bytes are the ones stored in the zone layout metadata.
-impl From<&BloomOptions> for [u8; OPTIONS_BYTES_LEN] {
-    fn from(options: &BloomOptions) -> Self {
-        let mut bytes = [0; OPTIONS_BYTES_LEN];
-        bytes[..size_of::<u32>()].copy_from_slice(&options.blocks_count.get().to_le_bytes());
-        bytes[size_of::<u32>()..].copy_from_slice(&(options.hash_fn as u32).to_le_bytes());
-
-        bytes
     }
 }
 
@@ -289,7 +269,7 @@ impl AggregateFnVTable for BloomFilter {
     }
 
     fn serialize(&self, options: &Self::Options) -> VortexResult<Option<Vec<u8>>> {
-        Ok(Some(Vec::from(options)))
+        Ok(Some(options.serialize()))
     }
 
     fn deserialize(
@@ -297,7 +277,7 @@ impl AggregateFnVTable for BloomFilter {
         metadata: &[u8],
         _session: &VortexSession,
     ) -> VortexResult<Self::Options> {
-        BloomOptions::try_from(metadata)
+        BloomOptions::deserialize(metadata)
     }
 
     /// Returns [Binary(Nullability::NonNullable)] when input [DType] is valid.
@@ -335,7 +315,7 @@ impl AggregateFnVTable for BloomFilter {
     ///
     /// Basically turns each block into a single byte sequence.
     fn to_scalar(&self, partial: &Self::Partial) -> VortexResult<Scalar> {
-        let bytes: Vec<u8> = partial.into();
+        let bytes: Vec<u8> = partial.serialize();
         Ok(Scalar::binary(bytes, Nullability::NonNullable))
     }
 
@@ -378,7 +358,7 @@ impl AggregateFnVTable for BloomFilter {
 ///
 /// This is defined by the available implementations in
 /// [constant::accumulate_constant] and [canonical::accumulate_canonical]
-fn is_bloom_valid_dtype(dtype: &DType) -> bool {
+pub(super) fn is_bloom_valid_dtype(dtype: &DType) -> bool {
     match dtype {
         DType::Extension(ext) => is_bloom_valid_dtype(ext.storage_dtype()),
         DType::Bool(_) | DType::Primitive(..) | DType::Utf8(_) | DType::Binary(_) => true,
@@ -423,7 +403,7 @@ pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
             .value()
             .ok_or_else(|| vortex_err!("bloom state must be non-null"))?;
 
-        let bloom_filter = BloomPartial::try_from(bytes.as_slice())?;
+        let bloom_filter = BloomPartial::deserialize(bytes.as_slice())?;
 
         Ok(bloom_filter)
     }
@@ -530,9 +510,11 @@ pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
             NonZeroU32::new(256).vortex_expect("valid nonzero"),
             HashFn::XxHash3_64,
         );
-        let bytes: [u8; OPTIONS_BYTES_LEN] = options.into();
 
-        check_metadata("bloom_filter_sbbf_xxhash3_64.metadata", &bytes);
+        check_metadata(
+            "bloom_filter_sbbf_xxhash3_64.metadata",
+            &options.serialize(),
+        );
     }
 
     #[test]
@@ -549,5 +531,16 @@ pub(in crate::layouts::zoned::aggregates::bloom_filter) mod test_utils {
 
         assert_eq!(default, same_as_default);
         assert_ne!(default, different_block_count);
+    }
+
+    #[test]
+    fn options_roundtrip() -> VortexResult<()> {
+        let options = BloomOptions::new(
+            NonZeroU32::new(256).expect("valid non-zero block count"),
+            HashFn::XxHash3_64,
+        );
+
+        assert_eq!(BloomOptions::deserialize(&options.serialize())?, options);
+        Ok(())
     }
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-//! Scalar helpers for Split Block Bloom Filters (SBBFs).
+//! Scalar helpers for Split Block Bloom Filters (SBBF).
 //!
 //! The core Bloom filter operates on bytes. This module provides scalar-aware
 //! insertion and membership helpers, including validation and conversion from

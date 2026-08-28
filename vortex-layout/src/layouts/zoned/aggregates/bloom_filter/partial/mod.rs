@@ -17,18 +17,14 @@ use std::fmt::Display;
 use std::fmt::Formatter;
 
 use twox_hash::XxHash3_64;
-use vortex_array::dtype::ToBytes;
 use vortex_error::VortexError;
-#[cfg(test)]
-use vortex_error::VortexResult;
-#[cfg(test)]
-use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
 
 use super::BloomOptions;
 
 mod aggregate;
 mod scalar;
+mod serde;
 
 pub(super) const SPLITS_PER_BLOCK: usize = 8;
 pub(super) const BYTES_PER_SPLIT: usize = size_of::<u32>(); // 4 bytes
@@ -238,22 +234,6 @@ impl BloomPartial {
     }
 }
 
-// Useful conversion implementations for serialization
-// used in [`BloomPartial::to_scalar`]
-impl From<&BloomPartial> for Vec<u8> {
-    fn from(val: &BloomPartial) -> Self {
-        let mut bytes = Vec::with_capacity(val.len() * BLOCK_SIZE);
-        bytes.extend(
-            val.blocks
-                .iter()
-                .flatten()
-                .flat_map(|block_seq| block_seq.to_le_bytes()),
-        );
-
-        bytes
-    }
-}
-
 /// Useful conversion used mostly for tests, and to
 /// start an empty partial from [`super::BloomFilter`].
 impl From<&BloomOptions> for BloomPartial {
@@ -287,56 +267,10 @@ impl From<Vec<[u32; 8]>> for BloomPartial {
 }
 
 #[cfg(test)]
-impl TryFrom<&[u8]> for BloomPartial {
-    type Error = VortexError;
-
-    /// Reconstructs a partial from its serialized byte representation
-    /// (the same layout produced by `to_scalar`).
-    fn try_from(bytes: &[u8]) -> VortexResult<Self> {
-        vortex_ensure!(
-            !bytes.is_empty() && bytes.len().is_multiple_of(BLOCK_SIZE),
-            "invalid bloom filter byte length: {}",
-            bytes.len()
-        );
-
-        let blocks = bytes
-            .as_chunks::<BLOCK_SIZE>()
-            .0
-            .iter()
-            .map(|chunk| {
-                let (split_bytes, remainder) = chunk.as_chunks::<BYTES_PER_SPLIT>();
-                let mut block = [0u32; 8];
-                vortex_ensure!(
-                    remainder.is_empty(),
-                    "invalid bloom filter, unexpected remainder bytes"
-                );
-
-                for (split, split_bytes) in block.iter_mut().zip(split_bytes) {
-                    *split = u32::from_le_bytes(*split_bytes);
-                }
-
-                Ok(block)
-            })
-            .collect::<VortexResult<Vec<_>>>()?;
-
-        vortex_ensure!(
-            !blocks.is_empty() && u32::try_from(blocks.len()).is_ok(),
-            "bloom blocks length must be non-zero and lower than u32::MAX",
-        );
-
-        Ok(BloomPartial {
-            blocks,
-            hash_fn: HashFn::XxHash3_64, // Default. Only used for tests.
-        })
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
 
     use rstest::rstest;
-    use vortex_array::dtype::ToBytes;
 
     use crate::layouts::zoned::aggregates::bloom_filter::BloomOptions;
     use crate::layouts::zoned::aggregates::bloom_filter::BloomPartial;
@@ -367,43 +301,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn valid_serde() {
-        let mut bloom_filter = BloomPartial::from(&BloomOptions::default());
-        bloom_filter.insert(32.to_le_bytes());
-
-        let bytes: Vec<u8> = (&bloom_filter).into();
-        let valid_filter = BloomPartial::try_from(bytes.as_slice()).unwrap();
-
-        assert!(
-            valid_filter.contains(32.to_le_bytes()),
-            "expect filter to have value"
-        );
-
-        assert!(
-            !valid_filter.contains(14.to_le_bytes()),
-            "expect filter to not have value"
-        );
-    }
-
-    #[test]
-    fn invalid_serde() {
-        let mut bloom_filter = BloomPartial::from(&BloomOptions::default());
-        bloom_filter.insert(32.to_le_bytes());
-
-        let mut bytes: Vec<u8> = (&bloom_filter).into();
-        bytes.pop();
-        let invalid_filter = BloomPartial::try_from(bytes.as_slice());
-
-        assert!(invalid_filter.is_err(), "expect filter to be invalid");
-
-        let mut bytes: Vec<u8> = (&bloom_filter).into();
-        bytes.push(0u8);
-        let invalid_filter = BloomPartial::try_from(bytes.as_slice());
-
-        assert!(invalid_filter.is_err(), "expect filter to be invalid");
-    }
-
     /// Another regression test for bloom serialization,
     /// but in this case to detect mask salt changes.
     /// It just verifies that a filter's serialized representation remains stable.
@@ -432,7 +329,7 @@ mod tests {
             .flat_map(u32::to_le_bytes)
             .collect();
 
-        let bytes: Vec<u8> = (&bloom_filter).into();
+        let bytes: Vec<u8> = bloom_filter.serialize();
         assert_eq!(bytes, expected_bytes);
     }
 
