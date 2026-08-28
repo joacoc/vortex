@@ -83,7 +83,7 @@ impl TryFrom<u32> for HashFn {
 
 /// Represents a Split block Bloom Filter for a single layout zone.
 ///
-/// The filter stores hashes of byte representations of values. [`Scalar`]
+/// The filter stores hashes of byte representations of values. `Scalar`
 /// values are converted to their underlying bytes before insertion. Other
 /// types whose underlying values can be represented as bytes can also be
 /// stored in the filter.

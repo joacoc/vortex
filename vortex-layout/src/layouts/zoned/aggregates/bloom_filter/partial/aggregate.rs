@@ -4,7 +4,7 @@
 //! Aggregation helpers for Split Block Bloom Filters (SBBFs).
 //!
 //! This module contains implementation details for the operations
-//! required by [`AggregateFnVTable`].
+//! required by `AggregateFnVTable`.
 
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure_eq;
