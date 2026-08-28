@@ -19,7 +19,7 @@ pub(super) fn accumulate_varbin(
     // Other agg. functions handle both cases together and always
     // check the validity, even when all values are valid.
     // I don't think there is much difference.
-    let mut process_view = |view: &BinaryView, buffers: &Vec<&Buffer<u8>>| {
+    let mut process_view = |view: &BinaryView, buffers: &[&Buffer<u8>]| {
         if view.is_inlined() {
             partial.insert(view.as_inlined().value());
         } else {

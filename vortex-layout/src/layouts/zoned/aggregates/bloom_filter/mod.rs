@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-//! Bloom-filter aggregate for zoned layouts.
+//! Bloom-filter aggregate implementation for zoned layouts.
+//!
+//! For more documentation about the bloom filter, see [`BloomFilter`]. For
+//! information about the metadata/options, see [`BloomOptions`], and for the
+//! actual implementation, see [`BloomPartial`].
 
 use std::fmt;
 use std::fmt::Display;

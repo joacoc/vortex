@@ -19,18 +19,19 @@ use std::fmt::Formatter;
 use twox_hash::XxHash3_64;
 use vortex_array::dtype::ToBytes;
 use vortex_error::VortexError;
+#[cfg(test)]
 use vortex_error::VortexResult;
 #[cfg(test)]
 use vortex_error::vortex_ensure;
-use vortex_error::vortex_ensure_eq;
 use vortex_error::vortex_err;
 
 use super::BloomOptions;
 
+mod aggregate;
 mod scalar;
 
-const SPLITS_PER_BLOCK: usize = 8;
-const BYTES_PER_SPLIT: usize = size_of::<u32>(); // 4 bytes
+pub(super) const SPLITS_PER_BLOCK: usize = 8;
+pub(super) const BYTES_PER_SPLIT: usize = size_of::<u32>(); // 4 bytes
 
 /// Block size (32 bytes [256 bits])
 pub(super) const BLOCK_SIZE: usize = SPLITS_PER_BLOCK * BYTES_PER_SPLIT;
@@ -81,6 +82,15 @@ impl TryFrom<u32> for HashFn {
 }
 
 /// Represents a Split block Bloom Filter for a single layout zone.
+///
+/// The filter stores hashes of byte representations of values. [`Scalar`]
+/// values are converted to their underlying bytes before insertion. Other
+/// types whose underlying values can be represented as bytes can also be
+/// stored in the filter.
+///
+/// The current implementation defaults to `XxHash3_64`,
+/// which is currently the only supported hash function and the fastest
+/// variant from the xxHash family.
 ///
 /// Usage example:
 ///
@@ -225,57 +235,6 @@ impl BloomPartial {
     #[inline]
     fn block_index(&self, hash: u64, blocks_count: usize) -> usize {
         (((hash >> 32) * blocks_count as u64) >> 32) as usize
-    }
-}
-
-/// Practical implementation to avoid having to share blocks
-impl BloomPartial {
-    /// Resets and empties all blocks.
-    #[inline]
-    pub(super) fn reset(&mut self) {
-        self.blocks.fill([0; 8]);
-    }
-
-    /// Returns true if all the blocks are saturated, in other words,
-    /// all bits are `1`.
-    #[inline]
-    pub(super) fn is_saturated(&self) -> bool {
-        self.blocks.iter().all(|byte| *byte == [u32::MAX; 8])
-    }
-
-    /// Merges a compatible serialized Bloom filter into this partial.
-    ///
-    /// The merge is a bitwise OR, which represents the union of two split-block
-    /// Bloom filters when they use the same block count.
-    ///
-    /// _Notice_ This method only validates the byte length.
-    /// Merging bytes from a filter created with a different hash function
-    /// will produce an invalid filter and introduce false negatives.
-    #[inline]
-    pub(super) fn merge(&mut self, other: &[u8]) -> VortexResult<()> {
-        // Partial returns size in blocks,
-        // while bytes contains len in amount of bytes.
-        // So blocks * block_size (bytes) = total amount of bytes
-        vortex_ensure_eq!(
-            self.len() * BLOCK_SIZE,
-            other.len(),
-            "bloom partial block count mismatch"
-        );
-
-        for (dst_block, src_block) in self
-            .blocks
-            .iter_mut()
-            .zip(other.as_chunks::<BLOCK_SIZE>().0)
-        {
-            for (dst_split, src_split) in dst_block
-                .iter_mut()
-                .zip(src_block.as_chunks::<BYTES_PER_SPLIT>().0)
-            {
-                *dst_split |= u32::from_le_bytes(*src_split);
-            }
-        }
-
-        Ok(())
     }
 }
 
