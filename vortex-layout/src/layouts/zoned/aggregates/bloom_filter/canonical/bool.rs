@@ -105,11 +105,11 @@ mod tests {
         let bloom_filter = build_filter(array.into_array(), DType::Bool(nullability), ctx)?;
 
         assert_eq!(
-            bloom_filter.contains_valid_scalar(&Scalar::bool(true, nullability))?,
+            bloom_filter.contains_scalar(&Scalar::bool(true, nullability))?,
             expect_true
         );
         assert_eq!(
-            bloom_filter.contains_valid_scalar(&Scalar::bool(false, nullability))?,
+            bloom_filter.contains_scalar(&Scalar::bool(false, nullability))?,
             expect_false
         );
 

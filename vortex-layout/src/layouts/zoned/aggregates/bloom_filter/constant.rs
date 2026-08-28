@@ -22,13 +22,7 @@ pub(super) fn accumulate_constant(
     partial: &mut BloomPartial,
 ) -> VortexResult<()> {
     let scalar: &Scalar = constant.scalar();
-
-    // Omit NULL values on purpose.
-    if scalar.is_null() {
-        return Ok(());
-    }
-
-    partial.insert_valid_scalar(scalar)?;
+    partial.insert_scalar(scalar)?;
 
     Ok(())
 }
@@ -74,7 +68,7 @@ mod tests {
     }
 
     #[test]
-    fn null_raises_error_on_hash() {
+    fn null_always_returns_false() {
         let bloom = BloomFilter;
         let zone_partial = bloom
             .empty_partial(
@@ -84,13 +78,13 @@ mod tests {
             .unwrap();
 
         assert!(
-            zone_partial
-                .contains_valid_scalar(&Scalar::null(DType::Primitive(
+            !zone_partial
+                .contains_scalar(&Scalar::null(DType::Primitive(
                     PType::I32,
                     Nullability::Nullable
                 )))
-                .is_err(),
-            "expected to return Err() for null scalars"
+                .expect("to return valid bool"),
+            "expected to return false for null scalars"
         )
     }
 
@@ -107,7 +101,7 @@ mod tests {
 
         accumulate_constant(&ConstantArray::new(scalar.clone(), 1), &mut zone_partial)?;
 
-        assert!(zone_partial.contains_valid_scalar(&scalar)?);
+        assert!(zone_partial.contains_scalar(&scalar)?);
         Ok(())
     }
 }

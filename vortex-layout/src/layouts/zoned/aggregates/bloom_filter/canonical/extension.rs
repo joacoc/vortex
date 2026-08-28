@@ -54,14 +54,14 @@ mod tests {
                 ext_dtype.clone(),
                 Scalar::primitive(value, Nullability::NonNullable),
             );
-            assert!(bloom_filter.contains_valid_scalar(&scalar)?);
+            assert!(bloom_filter.contains_scalar(&scalar)?);
         }
 
         let absent = Scalar::extension_ref(
             ext_dtype,
             Scalar::primitive(4_000i64, Nullability::NonNullable),
         );
-        assert!(!bloom_filter.contains_valid_scalar(&absent)?);
+        assert!(!bloom_filter.contains_scalar(&absent)?);
         Ok(())
     }
 
@@ -85,8 +85,8 @@ mod tests {
         );
         let null_slot_value =
             Scalar::extension_ref(ext_dtype, Scalar::primitive(0i64, Nullability::Nullable));
-        assert!(bloom_filter.contains_valid_scalar(&present)?);
-        assert!(!bloom_filter.contains_valid_scalar(&null_slot_value)?);
+        assert!(bloom_filter.contains_scalar(&present)?);
+        assert!(!bloom_filter.contains_scalar(&null_slot_value)?);
         Ok(())
     }
 }

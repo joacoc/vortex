@@ -96,11 +96,11 @@ mod tests {
 
         for &v in present {
             let scalar = Scalar::binary(v.as_bytes().to_vec(), Nullability::NonNullable);
-            assert!(bloom_filter.contains_valid_scalar(&scalar)?);
+            assert!(bloom_filter.contains_scalar(&scalar)?);
         }
 
         let absent_scalar = Scalar::binary(absent.as_bytes().to_vec(), Nullability::NonNullable);
-        assert!(!bloom_filter.contains_valid_scalar(&absent_scalar)?);
+        assert!(!bloom_filter.contains_scalar(&absent_scalar)?);
         Ok(())
     }
 
@@ -120,16 +120,16 @@ mod tests {
         let bloom_filter = build_filter(values.into_array(), dtype, ctx)?;
 
         let present = Scalar::binary(b"short".to_vec(), Nullability::NonNullable);
-        assert!(bloom_filter.contains_valid_scalar(&present)?);
+        assert!(bloom_filter.contains_scalar(&present)?);
 
         let present_long = Scalar::binary(
             b"Lorem ipsum dolor sit amet, consectetur adipiscing elit".to_vec(),
             Nullability::NonNullable,
         );
-        assert!(bloom_filter.contains_valid_scalar(&present_long)?);
+        assert!(bloom_filter.contains_scalar(&present_long)?);
 
         let absent = Scalar::binary(b"never ever".to_vec(), Nullability::NonNullable);
-        assert!(!bloom_filter.contains_valid_scalar(&absent)?);
+        assert!(!bloom_filter.contains_scalar(&absent)?);
         Ok(())
     }
 }

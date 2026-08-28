@@ -42,14 +42,14 @@ fn accumulate_primitive_float(
         match array.validity()?.execute_mask(slice.len(), ctx)? {
             Mask::AllTrue(_) => {
                 for value in slice {
-                    partial.insert_primitive(value);
+                    partial.insert(value.to_le_bytes());
                 }
             }
             Mask::AllFalse(_) => {}
             Mask::Values(mask_values) => {
                 for &(start, end) in mask_values.slices() {
                     for value in &slice[start..end] {
-                        partial.insert_primitive(value);
+                        partial.insert(value.to_le_bytes());
                     }
                 }
             }
@@ -83,14 +83,14 @@ where
     match array.validity()?.execute_mask(slice.len(), ctx)? {
         Mask::AllTrue(_) => {
             for value in slice {
-                partial.insert_primitive(value);
+                partial.insert(value.to_le_bytes());
             }
         }
         Mask::AllFalse(_) => {}
         Mask::Values(mask_values) => {
             for &(start, end) in mask_values.slices() {
                 for value in &slice[start..end] {
-                    partial.insert_primitive(value);
+                    partial.insert(value.to_le_bytes());
                 }
             }
         }
@@ -136,10 +136,10 @@ mod tests {
         )?;
         for &v in present {
             let scalar = Scalar::primitive(v, Nullability::NonNullable);
-            assert!(bloom_filter.contains_valid_scalar(&scalar)?);
+            assert!(bloom_filter.contains_scalar(&scalar)?);
         }
         let scalar = Scalar::primitive(absent, Nullability::NonNullable);
-        assert!(!bloom_filter.contains_valid_scalar(&scalar)?);
+        assert!(!bloom_filter.contains_scalar(&scalar)?);
         Ok(())
     }
 
@@ -161,7 +161,7 @@ mod tests {
 
         for &v in present {
             let scalar = Scalar::primitive(v, Nullability::Nullable);
-            assert!(bloom_filter.contains_valid_scalar(&scalar)?);
+            assert!(bloom_filter.contains_scalar(&scalar)?);
         }
 
         Ok(())
@@ -183,7 +183,7 @@ mod tests {
 
         for &v in present {
             let scalar = Scalar::primitive(v, Nullability::Nullable);
-            assert!(!bloom_filter.contains_valid_scalar(&scalar)?);
+            assert!(!bloom_filter.contains_scalar(&scalar)?);
         }
 
         Ok(())
@@ -211,7 +211,7 @@ mod tests {
         for (i, &v) in present.iter().enumerate() {
             if i % 2 == 0 {
                 let scalar = Scalar::primitive(v, Nullability::Nullable);
-                assert!(bloom_filter.contains_valid_scalar(&scalar)?);
+                assert!(bloom_filter.contains_scalar(&scalar)?);
             }
         }
 
@@ -240,18 +240,14 @@ mod tests {
         )?;
 
         assert!(
-            bloom_filter
-                .contains_valid_scalar(&Scalar::primitive(1.0_f64, Nullability::NonNullable))?
+            bloom_filter.contains_scalar(&Scalar::primitive(1.0_f64, Nullability::NonNullable))?
+        );
+        assert!(
+            bloom_filter.contains_scalar(&Scalar::primitive(3.0_f64, Nullability::NonNullable))?
         );
         assert!(
             bloom_filter
-                .contains_valid_scalar(&Scalar::primitive(3.0_f64, Nullability::NonNullable))?
-        );
-        assert!(
-            bloom_filter.contains_valid_scalar(&Scalar::primitive(
-                canonical_nan,
-                Nullability::NonNullable
-            ))?
+                .contains_scalar(&Scalar::primitive(canonical_nan, Nullability::NonNullable))?
         );
 
         // Check that another NaN doesn't exists.
@@ -261,11 +257,11 @@ mod tests {
 
         assert!(
             !bloom_filter
-                .contains_valid_scalar(&Scalar::primitive(other_nan, Nullability::NonNullable))?
+                .contains_scalar(&Scalar::primitive(other_nan, Nullability::NonNullable))?
         );
         assert!(
             !bloom_filter
-                .contains_valid_scalar(&Scalar::primitive(999.0_f64, Nullability::NonNullable))?
+                .contains_scalar(&Scalar::primitive(999.0_f64, Nullability::NonNullable))?
         );
 
         Ok(())

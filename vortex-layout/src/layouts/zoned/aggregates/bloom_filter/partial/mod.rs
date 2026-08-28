@@ -143,7 +143,7 @@ impl BloomPartial {
     /// A `false` result guarantees that the value is absent. A `true` result may
     /// be a false positive.
     ///
-    /// Use `BloomPartial::contains_valid_scalar` for scalar values.
+    /// Use `BloomPartial::contains_scalar` for scalar values.
     #[inline]
     pub fn contains<T>(&self, value: T) -> bool
     where
