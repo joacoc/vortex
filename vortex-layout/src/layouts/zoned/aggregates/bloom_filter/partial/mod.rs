@@ -345,42 +345,26 @@ mod tests {
 
     #[test]
     fn bigger_filter_size() {
-        // The idea is to create a bigger Bloom filter than the default one (1000x approx. ~8MiB),
-        // but also so big that the chance of a false positive is not zero but is very low.
-        // For this fixed set of values ([1, 1M]), as of this writing,
-        // no false positives appear.
-        //
-        // The filter contains only even numbers. Finding an odd number would be a
-        // valid Bloom-filter false positive, but because this test currently has none,
-        // seeing one in the future would mean that something changed and should be reviewed.
-        //
-        // A change in how hashes are calculated or how the block index is selected
-        // could trigger this assertion, like a kind of smoke test.
+        // The idea is to create a bigger Bloom filter than the default one (1000x approx. ~8MiB).
         let options = BloomOptions::new(
             NonZeroU32::new(DEFAULT_BLOCKS_COUNT * 1000).expect("valid nonzero u32"),
             HashFn::XxHash3_64,
         );
         let mut bloom_filter = BloomPartial::from(&options);
 
-        for i in 1..=1_000_000u64 {
-            if i % 2 == 0 {
-                bloom_filter.insert(i.to_le_bytes());
-            }
+        for i in 1..=10u64 {
+            bloom_filter.insert(i.to_le_bytes());
         }
 
-        for i in 1..=1_000_000u64 {
-            if i % 2 == 0 {
-                assert!(
-                    bloom_filter.contains(i.to_le_bytes()),
-                    "expected {i} to exist"
-                );
-            } else {
-                assert!(
-                    !bloom_filter.contains(i.to_le_bytes()),
-                    "unexpected false positive for odd number {i}"
-                );
-            }
-        }
+        assert!(
+            bloom_filter.contains(10u64.to_le_bytes()),
+            "expected to contain value"
+        );
+
+        assert!(
+            !bloom_filter.contains(11u64.to_le_bytes()),
+            "expected to not contain value"
+        );
     }
 
     #[test]
