@@ -1,7 +1,7 @@
-//! Min/max aggregate selection for zoned layouts.
-
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
+
+//! Min/max aggregate selection for zoned layouts.
 
 use vortex_array::aggregate_fn::AggregateFnRef;
 use vortex_array::aggregate_fn::AggregateFnVTableExt;

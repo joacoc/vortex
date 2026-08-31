@@ -26,6 +26,7 @@ use crate::layouts::zoned::AggregateStatsAccumulator;
 use crate::layouts::zoned::ZonedLayout;
 use crate::layouts::zoned::aggregate_partials;
 use crate::layouts::zoned::aggregates::default_zoned_aggregate_fns;
+use crate::layouts::zoned::skip_index::SkipIndexRef;
 use crate::segments::SegmentSinkRef;
 use crate::sequence::SendableSequentialStream;
 use crate::sequence::SequencePointer;
@@ -45,6 +46,7 @@ pub struct ZonedLayoutOptions {
     ///
     /// If unset, the writer chooses pruning aggregates from the input dtype.
     pub aggregate_fns: Option<Arc<[AggregateFnRef]>>,
+    pub skip_indexes: Option<Arc<[SkipIndexRef]>>,
     /// Number of chunks to compute aggregate partials in parallel.
     pub concurrency: NonZeroUsize,
 }
@@ -57,6 +59,7 @@ impl Default for ZonedLayoutOptions {
             concurrency: unsafe {
                 NonZeroUsize::new_unchecked(get_available_parallelism().unwrap_or(1))
             },
+            skip_indexes: None,
         }
     }
 }
@@ -92,11 +95,19 @@ impl LayoutStrategy for ZonedStrategy {
         mut eof: SequencePointer,
         session: &VortexSession,
     ) -> VortexResult<LayoutRef> {
-        let aggregate_fns = self
-            .options
-            .aggregate_fns
-            .clone()
-            .unwrap_or_else(|| default_zoned_aggregate_fns(stream.dtype(), session));
+        let aggregate_fns = self.options.aggregate_fns.clone().unwrap_or_else(|| {
+            let aggregate_fns = default_zoned_aggregate_fns(stream.dtype(), session);
+            let Some(skip_indexes) = &self.options.skip_indexes else {
+                return aggregate_fns;
+            };
+
+            let skip_aggregate_fns: Vec<AggregateFnRef> = skip_indexes
+                .iter()
+                .filter_map(|index| index.0.aggregate_fn(stream.dtype()))
+                .collect();
+
+            Arc::from([aggregate_fns.as_ref(), skip_aggregate_fns.as_ref()].concat())
+        });
         let compute_session = session.clone();
 
         let stats_accumulator = Arc::new(Mutex::new(AggregateStatsAccumulator::new(
