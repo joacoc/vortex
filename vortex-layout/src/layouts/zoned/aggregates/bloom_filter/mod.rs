@@ -30,6 +30,7 @@ use vortex_session::registry::CachedId;
 
 mod canonical;
 mod partial;
+mod scalar_fn;
 
 pub(in crate::layouts::zoned) mod constant;
 pub use partial::BloomPartial;
