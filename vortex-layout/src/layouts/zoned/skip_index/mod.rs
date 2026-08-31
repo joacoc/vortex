@@ -15,8 +15,6 @@ use vortex_session::VortexSession;
 use super::aggregates::default_zoned_aggregate_fns;
 use super::writer::ZonedLayoutOptions;
 
-pub mod bloom;
-
 /// One definition that supplies a persisted aggregate and registers every read-side component
 /// needed to consult it.
 ///
