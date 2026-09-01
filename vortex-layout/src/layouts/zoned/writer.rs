@@ -46,6 +46,11 @@ pub struct ZonedLayoutOptions {
     ///
     /// If unset, the writer chooses pruning aggregates from the input dtype.
     pub aggregate_fns: Option<Arc<[AggregateFnRef]>>,
+    /// Additional skip indexes to build for each block.
+    ///
+    /// **Note:** Register each index with the writing and reading sessions using
+    /// `SkipIndexSessionExt::register_skip_index`. This lets the writer build
+    /// the index and readers use it for pruning.
     pub skip_indexes: Option<Arc<[SkipIndexRef]>>,
     /// Number of chunks to compute aggregate partials in parallel.
     pub concurrency: NonZeroUsize,
@@ -95,19 +100,27 @@ impl LayoutStrategy for ZonedStrategy {
         mut eof: SequencePointer,
         session: &VortexSession,
     ) -> VortexResult<LayoutRef> {
-        let aggregate_fns = self.options.aggregate_fns.clone().unwrap_or_else(|| {
-            let aggregate_fns = default_zoned_aggregate_fns(stream.dtype(), session);
-            let Some(skip_indexes) = &self.options.skip_indexes else {
-                return aggregate_fns;
+        let aggregate_fns = self
+            .options
+            .aggregate_fns
+            .clone()
+            .unwrap_or_else(|| default_zoned_aggregate_fns(stream.dtype(), session));
+
+        // Combine default or user aggregation functions,
+        // with those contributed by skip indexes.
+        let aggregate_fns: Arc<[AggregateFnRef]> =
+            if let Some(skip_indexes) = &self.options.skip_indexes {
+                // Collect the aggregate functions contributed by the skip indexes.
+                let skip_aggregate_fns: Vec<_> = skip_indexes
+                    .iter()
+                    .filter_map(|index| index.aggregate_fn(stream.dtype()))
+                    .collect();
+
+                Arc::from([aggregate_fns.as_ref(), skip_aggregate_fns.as_ref()].concat())
+            } else {
+                aggregate_fns
             };
 
-            let skip_aggregate_fns: Vec<AggregateFnRef> = skip_indexes
-                .iter()
-                .filter_map(|index| index.0.aggregate_fn(stream.dtype()))
-                .collect();
-
-            Arc::from([aggregate_fns.as_ref(), skip_aggregate_fns.as_ref()].concat())
-        });
         let compute_session = session.clone();
 
         let stats_accumulator = Arc::new(Mutex::new(AggregateStatsAccumulator::new(

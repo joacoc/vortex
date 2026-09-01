@@ -19,7 +19,6 @@
 
 #![expect(clippy::expect_used)]
 
-use std::num::NonZeroU8;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -33,11 +32,11 @@ use vortex_array::assert_arrays_eq;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::Nullability;
 use vortex_array::dtype::PType;
-use vortex_array::expr::Expression;
-use vortex_array::expr::eq;
-use vortex_array::expr::get_item;
-use vortex_array::expr::lit;
-use vortex_array::expr::root;
+use vortex_array::expr::BoundExpression;
+use vortex_array::expr::bound::eq;
+use vortex_array::expr::bound::get_item;
+use vortex_array::expr::bound::lit;
+use vortex_array::expr::bound::root;
 use vortex_array::field_path;
 use vortex_array::stream::ArrayStreamExt;
 use vortex_error::VortexResult;
@@ -46,7 +45,7 @@ use vortex_file::WriteOptionsSessionExt;
 use vortex_file::WriteStrategyBuilder;
 use vortex_io::session::RuntimeSession;
 use vortex_layout::LayoutStrategy;
-use vortex_layout::layouts::zoned::skip_index::SkipIndex;
+use vortex_layout::layouts::zoned::skip_index::SkipIndexRef;
 use vortex_layout::layouts::zoned::skip_index::bloom::BloomOptions;
 use vortex_layout::layouts::zoned::skip_index::bloom::BloomSkipIndex;
 use vortex_layout::layouts::zoned::writer::ZonedLayoutOptions;
@@ -59,16 +58,11 @@ const NZONES: usize = 4;
 const HIT: i64 = 502;
 const MISS: i64 = 503;
 
-fn bloom() -> BloomSkipIndex {
-    // A deliberately roomy filter keeps this correctness test's false-positive outcome
-    // deterministic. False positives are valid Bloom behavior, but false negatives are not.
-    BloomSkipIndex::new(BloomOptions::new(
-        NonZeroUsize::new(1024).expect("1024 is non-zero"),
-        NonZeroU8::new(5).expect("5 is non-zero"),
-    ))
+fn bloom() -> Arc<BloomSkipIndex> {
+    Arc::new(BloomSkipIndex::new(BloomOptions::default()))
 }
 
-fn session(index: Option<&dyn SkipIndex>) -> VortexSession {
+fn session(index: Option<SkipIndexRef>) -> VortexSession {
     let session = vortex_array::array_session()
         .with::<LayoutSession>()
         .with::<RuntimeSession>();
@@ -116,24 +110,33 @@ fn data_with_shape(zone_len: usize, nzones: usize, missing: Option<i64>) -> Arra
     .into_array()
 }
 
-fn filter(value: i64) -> Expression {
-    eq(get_item("id", root()), lit(value))
+fn filter(value: i64) -> BoundExpression {
+    eq(
+        get_item(
+            "id",
+            root(DType::Primitive(PType::I64, Nullability::NonNullable)),
+        ),
+        lit(value),
+    )
 }
 
 fn strategy(
     session: &VortexSession,
-    index: Option<&dyn SkipIndex>,
+    index: SkipIndexRef,
     zone_len: usize,
 ) -> VortexResult<Arc<dyn LayoutStrategy>> {
     let mut options = ZonedLayoutOptions {
         block_size: NonZeroUsize::new(zone_len).expect("zone length is non-zero"),
         ..Default::default()
     };
-    if let Some(index) = index {
-        // Adding the aggregate to these field-specific zoned options is the explicit write-side
-        // opt-in. Registering the index in the session alone does not change the file layout.
-        options = options.with_skip_index(index, &PType::I64.into(), session)?;
-    }
+
+    // Registers the index into the session.
+    index.register(session);
+
+    // Adding the aggregate to these field-specific zoned options is the explicit write-side
+    // opt-in. Registering the index in the session alone does not change the file layout.
+    options = options.with_skip_index(index)?;
+
     Ok(WriteStrategyBuilder::default()
         .with_field_zoned_options(field_path!(id), options)
         .build())
@@ -150,7 +153,7 @@ async fn scan(file: &vortex_file::VortexFile, value: i64) -> VortexResult<ArrayR
 async fn write_file(
     session: &VortexSession,
     input: &ArrayRef,
-    index: Option<&dyn SkipIndex>,
+    index: SkipIndexRef,
     zone_len: usize,
 ) -> VortexResult<Vec<u8>> {
     let mut bytes = Vec::new();
@@ -165,14 +168,14 @@ async fn write_file(
 #[expect(clippy::tests_outside_test_module)]
 #[tokio::test]
 async fn bloom_roundtrip_prunes_and_unknown_reader_matches_full_scan() -> VortexResult<()> {
-    let index = bloom();
-    let write_session = session(Some(&index));
+    let index_ref = bloom();
+    let write_session = session(Some(&index_ref));
     let input = data();
-    let bytes = write_file(&write_session, &input, Some(&index), ZONE_LEN).await?;
+    let bytes = write_file(&write_session, &input, &index_ref, ZONE_LEN).await?;
 
     // Reconstruct every read-side extension from a fresh session rather than accidentally relying
     // on state retained by the writer.
-    let read_session = session(Some(&index));
+    let read_session = session(Some(&index_ref));
     let file = read_session.open_options().open_buffer(bytes.clone())?;
     let reader = file.layout_reader()?;
     let row_count = file.row_count();
