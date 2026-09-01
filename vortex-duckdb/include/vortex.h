@@ -124,6 +124,16 @@ void duckdb_copy_function_flush_batch(const void *global,
                                       const void *batch,
                                       duckdb_vx_error *error);
 
+extern
+bool duckdb_copy_function_get_written_file_statistics(const void *global_data,
+                                                      duckdb_vx_written_file_statistics *out);
+
+extern
+bool duckdb_copy_function_get_written_column_statistics(const void *global_data,
+                                                        size_t column_index,
+                                                        duckdb_vx_written_column_statistics *out,
+                                                        duckdb_vx_error *error_out);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

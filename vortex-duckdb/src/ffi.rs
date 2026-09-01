@@ -20,6 +20,8 @@ use crate::copy::copy_to_initialize_global;
 use crate::copy::copy_to_sink;
 use crate::copy::flush_batch;
 use crate::copy::prepare_batch_push;
+use crate::copy::written_column_stats;
+use crate::copy::written_file_stats;
 use crate::cpp;
 use crate::duckdb::AggregatePushdownInput;
 use crate::duckdb::BindResult;
@@ -406,4 +408,49 @@ pub unsafe extern "C-unwind" fn duckdb_copy_function_flush_batch(
         unsafe { global.cast::<CopyFunctionGlobal>().as_ref() }.vortex_expect("null pointer");
     let batch = unsafe { batch.cast::<CopyPreparedBatch>().as_ref() }.vortex_expect("null pointer");
     try_or(error, || flush_batch(global, batch))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn duckdb_copy_function_get_written_file_statistics(
+    global_data: *const c_void,
+    out: *mut cpp::duckdb_vx_written_file_statistics,
+) -> bool {
+    let global_data = unsafe { global_data.cast::<CopyFunctionGlobal>().as_ref() }
+        .vortex_expect("global_data null pointer");
+    let Some(stats) = written_file_stats(global_data) else {
+        return false;
+    };
+    let out = unsafe { &mut *out };
+    out.row_count = stats.row_count;
+    out.file_size_bytes = stats.file_size_bytes;
+    out.footer_size_bytes = stats.footer_size_bytes;
+    out.num_columns = stats.num_columns as u64;
+    true
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn duckdb_copy_function_get_written_column_statistics(
+    global_data: *const c_void,
+    column_index: usize,
+    out: *mut cpp::duckdb_vx_written_column_statistics,
+    error_out: *mut cpp::duckdb_vx_error,
+) -> bool {
+    let global_data = unsafe { global_data.cast::<CopyFunctionGlobal>().as_ref() }
+        .vortex_expect("global_data null pointer");
+    try_or(error_out, || {
+        let Some(stats) = written_column_stats(global_data, column_index)? else {
+            return Ok(false);
+        };
+        let out = unsafe { &mut *out };
+        out.min = stats.min.map_or(ptr::null_mut(), |v| v.into_ptr());
+        out.max = stats.max.map_or(ptr::null_mut(), |v| v.into_ptr());
+        out.has_null_count = stats.null_count.is_some();
+        out.null_count = stats.null_count.unwrap_or(0);
+        out.num_values = stats.num_values;
+        out.has_column_size = stats.column_size_bytes.is_some();
+        out.column_size_bytes = stats.column_size_bytes.unwrap_or(0);
+        out.has_nan_stat = stats.has_nan.is_some();
+        out.contains_nan = stats.has_nan.unwrap_or(false);
+        Ok(true)
+    })
 }
