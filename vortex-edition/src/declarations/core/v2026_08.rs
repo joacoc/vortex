@@ -3,10 +3,10 @@
 
 //! The frozen August 2026 core editions.
 
-use vortex_edition::Edition;
-use vortex_edition::EditionDeclaration;
-use vortex_edition::EditionId;
-use vortex_edition::EditionMember;
+use crate::Edition;
+use crate::EditionDeclaration;
+use crate::EditionId;
+use crate::EditionMember;
 
 /// The August 2026 core edition containing zoned layouts.
 pub const CORE_2026_08_0: EditionId = EditionId::new("core", 2026, 8, 0);
@@ -23,7 +23,7 @@ pub const CORE_2026_08_0: EditionId = EditionId::new("core", 2026, 8, 0);
 pub static DECLARATION_0: EditionDeclaration = EditionDeclaration {
     edition: Edition {
         id: CORE_2026_08_0,
-        min_vortex_version: Some("0.84.0"),
+        min_library_version: Some("0.84.0"),
     },
     added: &[
         EditionMember::layout(&"vortex.zoned"),
@@ -43,7 +43,7 @@ pub const CORE_2026_08_1: EditionId = EditionId::new("core", 2026, 8, 1);
 pub static DECLARATION_1: EditionDeclaration = EditionDeclaration {
     edition: Edition {
         id: CORE_2026_08_1,
-        min_vortex_version: Some("0.84.0"),
+        min_library_version: Some("0.84.0"),
     },
     added: &[EditionMember::array(&"vortex.onpair")],
 };

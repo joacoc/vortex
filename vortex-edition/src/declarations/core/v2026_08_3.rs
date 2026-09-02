@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-//! The August 2026 draft core edition adding Variant arrays and UUID extension dtypes.
+//! The August 2026 core edition adding Variant arrays and UUID extension dtypes.
 
-use vortex_edition::Edition;
-use vortex_edition::EditionDeclaration;
-use vortex_edition::EditionId;
-use vortex_edition::EditionMember;
+use crate::Edition;
+use crate::EditionDeclaration;
+use crate::EditionId;
+use crate::EditionMember;
 
 /// The fourth August 2026 edition of the `core` family.
 pub const CORE_2026_08_3: EditionId = EditionId::new("core", 2026, 8, 3);
@@ -15,7 +15,7 @@ pub const CORE_2026_08_3: EditionId = EditionId::new("core", 2026, 8, 3);
 pub static DECLARATION: EditionDeclaration = EditionDeclaration {
     edition: Edition {
         id: CORE_2026_08_3,
-        min_vortex_version: None,
+        min_library_version: Some("0.85.0"),
     },
     added: &[
         EditionMember::array(&"vortex.parquet.variant"),

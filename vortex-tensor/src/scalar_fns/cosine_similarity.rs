@@ -310,6 +310,7 @@ impl CosineSimilarity {
 mod tests {
 
     use rstest::rstest;
+    use vortex_array::ArrayDeserialization;
     use vortex_array::ArrayPlugin;
     use vortex_array::ArrayRef;
     use vortex_array::IntoArray;
@@ -755,17 +756,20 @@ mod tests {
         let original = CosineSimilarity::try_new(lhs.clone(), rhs.clone())?.into_array();
 
         let plugin = ScalarFnArrayPlugin::new(CosineSimilarity);
-        let metadata = plugin
+        let serialization = plugin
             .serialize(&original, &SESSION)?
             .expect("CosineSimilarity serialize must produce metadata");
 
         let children = vec![lhs, rhs];
         let recovered = plugin.deserialize(
-            original.dtype(),
-            original.len(),
-            &metadata,
-            &[],
-            &children,
+            ArrayDeserialization::new(
+                plugin.id(),
+                original.dtype(),
+                original.len(),
+                &serialization.metadata,
+                &[],
+                &children,
+            ),
             &SESSION,
         )?;
 

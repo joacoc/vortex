@@ -3,10 +3,10 @@
 
 //! The `core` edition adding stable encodings released through June 2025.
 
-use vortex_edition::Edition;
-use vortex_edition::EditionDeclaration;
-use vortex_edition::EditionId;
-use vortex_edition::EditionMember;
+use crate::Edition;
+use crate::EditionDeclaration;
+use crate::EditionId;
+use crate::EditionMember;
 
 /// The June 2025 edition of the `core` family.
 pub const CORE_2025_06_0: EditionId = EditionId::new("core", 2025, 6, 0);
@@ -15,7 +15,7 @@ pub const CORE_2025_06_0: EditionId = EditionId::new("core", 2025, 6, 0);
 pub static DECLARATION: EditionDeclaration = EditionDeclaration {
     edition: Edition {
         id: CORE_2025_06_0,
-        min_vortex_version: Some("0.40.0"),
+        min_library_version: Some("0.40.0"),
     },
     added: &[
         EditionMember::array(&"vortex.pco"),

@@ -650,7 +650,7 @@ fn build_array_encoding_tree_from_array(
         .array_serialize(array)
         .ok()
         .flatten()
-        .map(|m| m.len())
+        .map(|serialization| serialization.metadata.len())
         .unwrap_or(0);
 
     let named_children = array.named_children();
