@@ -33,6 +33,7 @@ pub trait UnpackStrategy<T: PhysicalPType> {
 pub struct BitPackingStrategy;
 
 impl<T: PhysicalPType<Physical: BitPacking>> UnpackStrategy<T> for BitPackingStrategy {
+    #[allow(clippy::inline_always)]
     #[inline(always)]
     unsafe fn unpack_chunk(
         &self,
@@ -153,6 +154,7 @@ impl<'a, T: PhysicalPType, S: UnpackStrategy<T>> UnpackedChunks<'a, T, S> {
         })
     }
 
+    #[allow(clippy::inline_always)]
     #[inline(always)]
     const fn elems_per_chunk(&self) -> usize {
         128 * self.bit_width / size_of::<T>()
