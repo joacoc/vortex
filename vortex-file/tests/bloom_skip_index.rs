@@ -46,8 +46,10 @@ use vortex_file::WriteStrategyBuilder;
 use vortex_io::session::RuntimeSession;
 use vortex_layout::LayoutStrategy;
 use vortex_layout::layouts::zoned::skip_index::SkipIndexRef;
-use vortex_layout::layouts::zoned::skip_index::bloom::BloomOptions;
-use vortex_layout::layouts::zoned::skip_index::bloom::BloomSkipIndex;
+// TODO (joacoc)
+// Uncomment after merging the BloomFilter https://github.com/vortex-data/vortex/pull/9398.
+// use vortex_layout::layouts::zoned::skip_index::bloom::BloomOptions;
+// use vortex_layout::layouts::zoned::skip_index::bloom::BloomSkipIndex;
 use vortex_layout::layouts::zoned::writer::ZonedLayoutOptions;
 use vortex_layout::session::LayoutSession;
 use vortex_mask::Mask;
@@ -58,11 +60,14 @@ const NZONES: usize = 4;
 const HIT: i64 = 502;
 const MISS: i64 = 503;
 
-fn bloom() -> Arc<BloomSkipIndex> {
-    Arc::new(BloomSkipIndex::new(BloomOptions::default()))
+fn bloom() -> SkipIndexRef {
+    // TODO (joacoc)
+    // Uncomment after merging the BloomFilter https://github.com/vortex-data/vortex/pull/9398.
+    // SkipIndexRef::new(Arc::new(BloomSkipIndex::new(BloomOptions::default())))
+    todo!();
 }
 
-fn session(index: Option<SkipIndexRef>) -> VortexSession {
+fn session(index: Option<&SkipIndexRef>) -> VortexSession {
     let session = vortex_array::array_session()
         .with::<LayoutSession>()
         .with::<RuntimeSession>();
@@ -122,7 +127,7 @@ fn filter(value: i64) -> BoundExpression {
 
 fn strategy(
     session: &VortexSession,
-    index: SkipIndexRef,
+    index: &SkipIndexRef,
     zone_len: usize,
 ) -> VortexResult<Arc<dyn LayoutStrategy>> {
     let mut options = ZonedLayoutOptions {
@@ -135,7 +140,7 @@ fn strategy(
 
     // Adding the aggregate to these field-specific zoned options is the explicit write-side
     // opt-in. Registering the index in the session alone does not change the file layout.
-    options = options.with_skip_index(index)?;
+    options = options.with_skip_index(index.clone())?;
 
     Ok(WriteStrategyBuilder::default()
         .with_field_zoned_options(field_path!(id), options)
@@ -153,7 +158,7 @@ async fn scan(file: &vortex_file::VortexFile, value: i64) -> VortexResult<ArrayR
 async fn write_file(
     session: &VortexSession,
     input: &ArrayRef,
-    index: SkipIndexRef,
+    index: &SkipIndexRef,
     zone_len: usize,
 ) -> VortexResult<Vec<u8>> {
     let mut bytes = Vec::new();
