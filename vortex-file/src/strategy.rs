@@ -249,12 +249,9 @@ impl WriteStrategyBuilder {
         // Fields can have custom writers, custom zone options, or just use defaults.
         // Zone options and defaults use the same `ZonedStrategy` and `RepartitionStrategy`
         // but with different options, so this helper builds that shared part for both cases.
-        let build_repartition_strategy =
+        let build_repartition =
             |zone_layout_options: ZonedLayoutOptions| -> Arc<dyn LayoutStrategy> {
                 let zone_block_size = zone_layout_options.block_size.get();
-
-                // TODO(joacoc): What if similar zoned strategies can share more state?
-                // Cloning `DictStrategy` is cheap, but each options set creates a new strategy.
 
                 // 2. calculate stats for each row group
                 let stats = ZonedStrategy::new(
@@ -276,17 +273,17 @@ impl WriteStrategyBuilder {
                 ))
             };
 
-        let repartition_strategy = build_repartition_strategy(ZonedLayoutOptions {
+        let repartition_strategy = build_repartition(ZonedLayoutOptions {
             // Always repartition into 8K row blocks
             block_size: row_block_size,
             ..Default::default()
         });
 
-        // Explicit field writers must override writers built from zoned options.
+        // Explicit field writers overrides writers built from zoned options.
         let field_writers: HashMap<FieldPath, Arc<dyn LayoutStrategy>> = self
             .field_zoned_options
             .into_iter()
-            .map(|(field, options)| (field, build_repartition_strategy(options)))
+            .map(|(field, options)| (field, build_repartition(options)))
             .chain(self.field_writers)
             .collect();
 

@@ -19,8 +19,6 @@ use super::writer::ZonedLayoutOptions;
 /// seam. Readers call [`SkipIndex::register`] on their session before opening the file.
 pub trait SkipIndex: Send + Sync + 'static {
     /// The aggregate state to persist for `input_dtype`, or `None` when unsupported.
-    ///
-    /// TODO (joacoc): when is it possible to be unsupported?
     fn aggregate_fn(&self, input_dtype: &DType) -> Option<AggregateFnRef>;
 
     /// Register the aggregate, optional probe function, and predicate rewrite as one operation.
@@ -78,11 +76,11 @@ impl SkipIndexRef {
 }
 
 impl ZonedLayoutOptions {
-    /// Add `index` to this zoned writer while retaining the default min/max-style aggregates.
+    /// Add `skip_index` to this zoned writer while retaining the default min/max-style aggregates.
     ///
     /// `WriteStrategyBuilder::with_field_zoned_options` can install the configured options for one
     /// field while retaining the default data layout pipeline.
-    pub fn with_skip_index(mut self, index: SkipIndexRef) -> VortexResult<Self> {
+    pub fn with_skip_index(mut self, skip_index: SkipIndexRef) -> VortexResult<Self> {
         let mut skip_indexes: Vec<SkipIndexRef> = self
             .skip_indexes
             .take()
@@ -90,7 +88,7 @@ impl ZonedLayoutOptions {
             .unwrap_or_default();
 
         // TODO (joacoc): avoid duplicates
-        skip_indexes.push(index);
+        skip_indexes.push(skip_index);
 
         self.skip_indexes = Some(skip_indexes.into());
         Ok(self)

@@ -110,7 +110,6 @@ impl LayoutStrategy for ZonedStrategy {
         // with those contributed by skip indexes.
         let aggregate_fns: Arc<[AggregateFnRef]> =
             if let Some(skip_indexes) = &self.options.skip_indexes {
-                // Collect the aggregate functions contributed by the skip indexes.
                 let skip_aggregate_fns: Vec<_> = skip_indexes
                     .iter()
                     .filter_map(|index| index.aggregate_fn(stream.dtype()))
