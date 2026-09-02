@@ -49,6 +49,15 @@ impl BufferAllocatorRef {
         self.0.is_none()
     }
 
+    /// Returns true if both references point to the same allocator.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (None, None) => true,
+            (Some(lhs), Some(rhs)) => Arc::ptr_eq(lhs, rhs),
+            _ => false,
+        }
+    }
+
     /// Create a mutable buffer with this allocator.
     pub fn with_capacity<T>(&self, capacity: usize) -> BufferMut<T> {
         BufferMut::with_capacity_in(capacity, self.clone())
@@ -420,6 +429,17 @@ mod tests {
             // SAFETY: the caller upholds the Allocator contract.
             unsafe { Global.grow(ptr, old_layout, new_layout) }
         }
+    }
+
+    #[test]
+    fn allocator_identity() {
+        let static_allocator = BufferAllocatorRef::statically_allocated();
+        assert!(static_allocator.ptr_eq(&BufferAllocatorRef::statically_allocated()));
+
+        let custom_allocator = BufferAllocatorRef::new(TrackingAllocator::default());
+        assert!(custom_allocator.ptr_eq(&custom_allocator.clone()));
+        assert!(!custom_allocator.ptr_eq(&static_allocator));
+        assert!(!custom_allocator.ptr_eq(&BufferAllocatorRef::new(TrackingAllocator::default())));
     }
 
     #[test]
