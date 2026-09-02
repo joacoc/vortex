@@ -2,6 +2,20 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 //! Aggregate functions selected by the zoned layout.
+//!
+//! The present aggregation functions are used as stats
+//! for pruning during reads of Vortex files. When
+//! chosen during writes, they are computed and stored
+//! for each zone assigned by the writer.
+//!
+//! For correct reading and writing, a session
+//! must have loaded the functions for both reads and writes.
+//! In case an aggregation function is not loaded,
+//! Vortex will disable zoned pruning and scan the data normally.
+//!
+//! In this module you will find the current defaults,
+//! which are stats selected by default for each zone,
+//! and opt-ins implementations.
 
 use std::sync::Arc;
 
@@ -54,7 +68,7 @@ mod tests {
     use super::default_zoned_aggregate_fns;
 
     // TODO (joacoc)
-    // Uncomment after merging with BloomFilter code.
+    // Uncomment after merging the BloomFilter https://github.com/vortex-data/vortex/pull/9398.
     //
     // use super::BloomFilter;
     // use super::bloom_filter::BloomOptions;

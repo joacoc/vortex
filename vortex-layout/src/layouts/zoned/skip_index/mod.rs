@@ -2,12 +2,34 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 //! Skipping-index interface and implementations.
+//!
+//! The skip index provides a way to prune zones
+//! by using the results of an aggregation function.
+//! During writes, an aggregation function calculates stats for each zone.
+//! During reads, these stats are interpreted to determine whether a zone
+//! can be pruned.
+//!
+//! Unlike a locating index, a skipping index summarizes a contiguous
+//! range of rows in a zone. It does not locate matching rows. It only
+//! proves that a zone cannot match a predicate.
+//!
+//! For correct reading and writing, a session must have registered the skip index.
+//! If a skip index is not loaded and the session allows unknown plugins,
+//! Vortex disables zoned pruning and scans the data normally. Otherwise,
+//! opening the file fails.
+//!
+//! The skip index is coupled to the zoned layout through [`ZonedLayoutOptions`].
+//! To set one up, a user must declare a skip index for a field
+//! through the writer configuration.
 
 use std::sync::Arc;
 
+use vortex_array::aggregate_fn::AggregateFnId;
 use vortex_array::aggregate_fn::AggregateFnRef;
 use vortex_array::dtype::DType;
 use vortex_error::VortexResult;
+use vortex_error::vortex_bail;
+use vortex_session::SessionExt;
 use vortex_session::VortexSession;
 
 use super::writer::ZonedLayoutOptions;
@@ -16,8 +38,12 @@ use super::writer::ZonedLayoutOptions;
 /// needed to consult it.
 ///
 /// The writer helper [`ZonedLayoutOptions::with_skip_index`] is the explicit per-column declaration
-/// seam. Readers call [`SkipIndex::register`] on their session before opening the file.
+/// seam. Readers call [`SkipIndexSessionExt::register_skip_index`] on their
+/// [`VortexSession`] before opening the file.
 pub trait SkipIndex: Send + Sync + 'static {
+    /// Returns the inner aggregate identifier.
+    fn aggregate_id(&self) -> AggregateFnId;
+
     /// The aggregate state to persist for `input_dtype`, or `None` when unsupported.
     fn aggregate_fn(&self, input_dtype: &DType) -> Option<AggregateFnRef>;
 
@@ -25,18 +51,15 @@ pub trait SkipIndex: Send + Sync + 'static {
     fn register(&self, session: &VortexSession);
 }
 
-// TODO(joacoc): It is more ergonomic, but I still need to check if `SkipIndexSessionExt`
-// follows the conventions used by other session extensions.
-
-/// Adds skip-index registration methods to [`VortexSession`].
-pub trait SkipIndexSessionExt {
+/// Extension trait for registering skipping indexes with a Vortex session.
+pub trait SkipIndexSessionExt: SessionExt {
     /// Registers a skip index with this session.
     ///
-    /// Register the index with every session that writes or reads files containing it.
-    /// Registration makes the index implementation available, but does not add the index to a
-    /// file. To write it, also add the [`SkipIndexRef`] to [`ZonedLayoutOptions`].
+    /// Registration makes the skipping-index implementation available to the session,
+    /// but does not add it to a file. To write one, add it to  [`ZonedLayoutOptions::with_skip_index`]
+    /// when configuring the field's zoned layout in the `WriteStrategyBuilder`.
     ///
-    /// # Example
+    /// # Usage example
     ///
     /// ```
     /// use vortex_layout::layouts::zoned::skip_index::{
@@ -48,14 +71,12 @@ pub trait SkipIndexSessionExt {
     ///     session.register_skip_index(index);
     /// }
     /// ```
-    fn register_skip_index(&self, index: &SkipIndexRef);
-}
-
-impl SkipIndexSessionExt for VortexSession {
-    fn register_skip_index(&self, index: &SkipIndexRef) {
-        index.register(self);
+    fn register_skip_index(&self, skip_index: &SkipIndexRef) {
+        skip_index.register(&self.session());
     }
 }
+
+impl<S: SessionExt> SkipIndexSessionExt for S {}
 
 /// A reference-counted [`SkipIndex`].
 #[derive(Clone)]
@@ -64,6 +85,10 @@ pub struct SkipIndexRef(Arc<dyn SkipIndex>);
 impl SkipIndexRef {
     pub fn new(index_ref: Arc<dyn SkipIndex>) -> Self {
         SkipIndexRef(index_ref)
+    }
+
+    pub fn aggregate_id(&self) -> AggregateFnId {
+        self.0.aggregate_id()
     }
 
     pub fn aggregate_fn(&self, input_dtype: &DType) -> Option<AggregateFnRef> {
@@ -81,15 +106,23 @@ impl ZonedLayoutOptions {
     /// `WriteStrategyBuilder::with_field_zoned_options` can install the configured options for one
     /// field while retaining the default data layout pipeline.
     pub fn with_skip_index(mut self, skip_index: SkipIndexRef) -> VortexResult<Self> {
-        let mut skip_indexes: Vec<SkipIndexRef> = self
+        let mut skip_indexes = self
             .skip_indexes
             .take()
-            .map(|arc| arc.to_vec())
+            .map(|indexes| indexes.to_vec())
             .unwrap_or_default();
 
-        // TODO (joacoc): avoid duplicates
-        skip_indexes.push(skip_index);
+        if skip_indexes
+            .iter()
+            .any(|index| index.aggregate_id() == skip_index.aggregate_id())
+        {
+            vortex_bail!(
+                "skip index aggregate {} is already configured",
+                skip_index.aggregate_id()
+            );
+        }
 
+        skip_indexes.push(skip_index);
         self.skip_indexes = Some(skip_indexes.into());
         Ok(self)
     }

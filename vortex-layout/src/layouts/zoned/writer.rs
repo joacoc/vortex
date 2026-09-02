@@ -49,7 +49,7 @@ pub struct ZonedLayoutOptions {
     /// Additional skip indexes to build for each block.
     ///
     /// **Note:** Register each index with the writing and reading sessions using
-    /// `SkipIndexSessionExt::register_skip_index`. This lets the writer build
+    /// `session.register_skip_index(...);`. This lets the writer build
     /// the index and readers use it for pruning.
     pub skip_indexes: Option<Arc<[SkipIndexRef]>>,
     /// Number of chunks to compute aggregate partials in parallel.
@@ -100,25 +100,39 @@ impl LayoutStrategy for ZonedStrategy {
         mut eof: SequencePointer,
         session: &VortexSession,
     ) -> VortexResult<LayoutRef> {
-        let aggregate_fns = self
+        let mut aggregate_fns = self
             .options
             .aggregate_fns
             .clone()
-            .unwrap_or_else(|| default_zoned_aggregate_fns(stream.dtype(), session));
+            .unwrap_or_else(|| default_zoned_aggregate_fns(stream.dtype(), session))
+            .to_vec();
 
-        // Combine default or user aggregation functions,
-        // with those contributed by skip indexes.
-        let aggregate_fns: Arc<[AggregateFnRef]> =
-            if let Some(skip_indexes) = &self.options.skip_indexes {
-                let skip_aggregate_fns: Vec<_> = skip_indexes
-                    .iter()
-                    .filter_map(|index| index.aggregate_fn(stream.dtype()))
-                    .collect();
+        // Append aggregate functions contributed by skip indexes to
+        // the default or user-provided aggregation functions
+        if let Some(skip_indexes) = &self.options.skip_indexes {
+            for skip_index in skip_indexes.iter() {
+                match skip_index.aggregate_fn(stream.dtype()) {
+                    Some(skip_aggregate_fn) => {
+                        if aggregate_fns
+                            .iter()
+                            .any(|aggregate_fn| aggregate_fn.id() == skip_aggregate_fn.id())
+                        {
+                            vortex_bail!(
+                                "skip index aggregate {} is configured more than once",
+                                skip_aggregate_fn.id()
+                            );
+                        }
 
-                Arc::from([aggregate_fns.as_ref(), skip_aggregate_fns.as_ref()].concat())
-            } else {
-                aggregate_fns
-            };
+                        aggregate_fns.push(skip_aggregate_fn);
+                    }
+                    None => vortex_bail!(
+                        "skip index aggregate {} is unsupported for type {}",
+                        skip_index.aggregate_id(),
+                        stream.dtype()
+                    ),
+                }
+            }
+        }
 
         let compute_session = session.clone();
 
