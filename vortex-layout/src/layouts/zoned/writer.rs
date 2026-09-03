@@ -1,7 +1,7 @@
-//! Write-time assembly for zoned layouts.
-
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
+
+//! Write-time assembly for zoned layouts.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -112,24 +112,8 @@ impl LayoutStrategy for ZonedStrategy {
         if let Some(skip_indexes) = &self.options.skip_indexes {
             for skip_index in skip_indexes.iter() {
                 match skip_index.aggregate_fn(stream.dtype()) {
-                    Some(skip_aggregate_fn) => {
-                        if aggregate_fns
-                            .iter()
-                            .any(|aggregate_fn| aggregate_fn.id() == skip_aggregate_fn.id())
-                        {
-                            vortex_bail!(
-                                "skip index aggregate {} is configured more than once",
-                                skip_aggregate_fn.id()
-                            );
-                        }
-
-                        aggregate_fns.push(skip_aggregate_fn);
-                    }
-                    None => vortex_bail!(
-                        "skip index aggregate {} is unsupported for type {}",
-                        skip_index.aggregate_id(),
-                        stream.dtype()
-                    ),
+                    Some(skip_aggregate_fn) => aggregate_fns.push(skip_aggregate_fn),
+                    None => vortex_bail!("skip index is unsupported for type {}", stream.dtype()),
                 }
             }
         }
@@ -230,6 +214,8 @@ mod tests {
     use vortex_array::ArrayContext;
     use vortex_array::IntoArray;
     use vortex_array::aggregate_fn::AggregateFnVTable;
+    use vortex_array::aggregate_fn::AggregateFnVTableExt;
+    use vortex_array::aggregate_fn::NumericalAggregateOpts;
     use vortex_array::aggregate_fn::fns::bounded_max::BoundedMax;
     use vortex_array::aggregate_fn::fns::bounded_min::BoundedMin;
     use vortex_array::aggregate_fn::fns::max::Max;
@@ -256,6 +242,7 @@ mod tests {
     use crate::layouts::flat::writer::FlatLayoutStrategy;
     use crate::layouts::zoned::Zoned;
     use crate::layouts::zoned::schema::default_bounded_stat_max_bytes;
+    use crate::layouts::zoned::skip_index::SkipIndex;
     use crate::segments::TestSegments;
     use crate::sequence::SequenceId;
     use crate::sequence::SequentialArrayStreamExt;
@@ -263,14 +250,14 @@ mod tests {
 
     /// Write three zones of primitives through `ctx`, returning the aggregates the zoned
     /// layout recorded.
-    fn write_zones(ctx: LayoutWriterContext) -> VortexResult<Vec<String>> {
+    fn write_zones_with_options(
+        ctx: LayoutWriterContext,
+        options: ZonedLayoutOptions,
+    ) -> VortexResult<Vec<String>> {
         let strategy = ZonedStrategy::new(
             ChunkedLayoutStrategy::new(FlatLayoutStrategy::default()),
             FlatLayoutStrategy::default(),
-            ZonedLayoutOptions {
-                block_size: NonZeroUsize::new(3).vortex_expect("non zero"),
-                ..Default::default()
-            },
+            options,
         );
         let (ptr, eof) = SequenceId::root().split();
         let stream = ChunkedArray::from_iter([
@@ -304,6 +291,16 @@ mod tests {
             .iter()
             .map(|aggregate_fn| aggregate_fn.id().to_string())
             .collect())
+    }
+
+    fn write_zones(ctx: LayoutWriterContext) -> VortexResult<Vec<String>> {
+        write_zones_with_options(
+            ctx,
+            ZonedLayoutOptions {
+                block_size: NonZeroUsize::new(3).vortex_expect("non zero"),
+                ..Default::default()
+            },
+        )
     }
 
     #[test]
@@ -379,5 +376,65 @@ mod tests {
                 .iter()
                 .all(|aggregate_fn| !aggregate_fn.is::<Sum>())
         );
+    }
+
+    // TODO (joacoc): replace with bloom skip index after merge <https://github.com/vortex-data/vortex/pull/9398>
+    // Just a small skip-index implementation used to test the zoned writer until the bloom filter lands.
+    struct TestSkipIndex {
+        aggregate_fn: Option<AggregateFnRef>,
+    }
+
+    impl TestSkipIndex {
+        fn new(aggregate_fn: AggregateFnRef) -> Self {
+            Self {
+                aggregate_fn: Some(aggregate_fn),
+            }
+        }
+
+        fn unsupported() -> Self {
+            Self { aggregate_fn: None }
+        }
+
+        fn into_ref(self) -> SkipIndexRef {
+            SkipIndexRef::new(Arc::new(self))
+        }
+    }
+
+    impl SkipIndex for TestSkipIndex {
+        fn aggregate_fn(&self, _input_dtype: &DType) -> Option<AggregateFnRef> {
+            self.aggregate_fn.clone()
+        }
+
+        fn register(&self, _session: &VortexSession) {}
+    }
+
+    #[test]
+    fn writer_appends_skip_index_aggregate() -> VortexResult<()> {
+        let options = ZonedLayoutOptions::default().with_skip_index(
+            TestSkipIndex::new(Sum.bind(NumericalAggregateOpts::default())).into_ref(),
+        );
+        let written =
+            write_zones_with_options(LayoutWriterContext::new(ArrayContext::empty()), options)?;
+
+        assert!(
+            written.contains(&Sum.id().to_string()),
+            "expected aggregation id present, wrote {written:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn writer_rejects_skip_index_unsupported_for_dtype() -> VortexResult<()> {
+        let options =
+            ZonedLayoutOptions::default().with_skip_index(TestSkipIndex::unsupported().into_ref());
+
+        let error =
+            write_zones_with_options(LayoutWriterContext::new(ArrayContext::empty()), options)
+                .expect_err("unsupported skip index should fail the write");
+        assert!(
+            error.to_string().contains("unsupported for type"),
+            "unexpected error: {error}"
+        );
+        Ok(())
     }
 }

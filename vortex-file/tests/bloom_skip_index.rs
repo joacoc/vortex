@@ -140,7 +140,7 @@ fn strategy(
 
     // Adding the aggregate to these field-specific zoned options is the explicit write-side
     // opt-in. Registering the index in the session alone does not change the file layout.
-    options = options.with_skip_index(index.clone())?;
+    options = options.with_skip_index(index.clone());
 
     Ok(WriteStrategyBuilder::default()
         .with_field_zoned_options(field_path!(id), options)
