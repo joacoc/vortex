@@ -134,7 +134,11 @@ impl ScalarFnVTable for BloomContains {
             .into_array());
         }
 
-        let validity = filters.varbinview_validity();
+        let validity = filters
+            .varbinview_validity()
+            // Match the expected nullability defined by `BloomContains::return_dtype`.
+            .union_nullability(needle.dtype().nullability());
+
         let valid = validity.execute_mask(filters.len(), ctx)?;
 
         // The bloom filter is a probabilistic structure,
@@ -283,8 +287,10 @@ mod tests {
     use vortex_array::VortexSessionExecute;
     use vortex_array::aggregate_fn::AggregateFnVTableExt;
     use vortex_array::aggregate_fn::session::AggregateFnSessionExt;
+    use vortex_array::array_session;
     use vortex_array::arrays::BoolArray;
     use vortex_array::arrays::ConstantArray;
+    use vortex_array::arrays::ScalarFnArray;
     use vortex_array::arrays::StructArray;
     use vortex_array::arrays::VarBinViewArray;
     use vortex_array::assert_arrays_eq;
@@ -298,6 +304,7 @@ mod tests {
     use vortex_array::scalar::DecimalValue;
     use vortex_array::scalar::Scalar;
     use vortex_array::scalar_fn::ScalarFnVTable;
+    use vortex_array::scalar_fn::ScalarFnVTableExt;
     use vortex_array::scalar_fn::VecExecutionArgs;
     use vortex_array::scalar_fn::session::ScalarFnSessionExt;
     use vortex_array::stats::StatsSessionExt;
@@ -332,7 +339,7 @@ mod tests {
     fn bloom_rule_prunes_ok() -> VortexResult<()> {
         let options = BloomOptions::default();
         let aggregate_fn = BloomFilter.bind(options.clone());
-        let session = vortex_array::array_session();
+        let session = array_session();
         register(&session, options.clone());
 
         let filters = VarBinViewArray::from_iter_nullable_bin([
@@ -369,7 +376,7 @@ mod tests {
     #[test]
     fn bloom_rule_is_inconclusive_for_nulls() -> VortexResult<()> {
         let dtype = DType::Primitive(PType::I64, Nullability::Nullable);
-        let session = vortex_array::array_session();
+        let session = array_session();
         let ctx = StatsRewriteCtx::new(&session);
         let rule = BloomEqRewrite {
             options: BloomOptions::default(),
@@ -386,7 +393,7 @@ mod tests {
     #[test]
     fn missing_bloom_stat_stays_inconclusive() -> VortexResult<()> {
         let options = BloomOptions::default();
-        let session = vortex_array::array_session();
+        let session = array_session();
         register(&session, options);
 
         let dtype = DType::Primitive(PType::I64, Nullability::NonNullable);
@@ -413,7 +420,7 @@ mod tests {
             VarBinViewArray::from_iter_bin([b"not a bloom filter".as_slice()]).into_array();
         let needle = ConstantArray::new(42i64, 1).into_array();
         let args = VecExecutionArgs::new(vec![filters, needle], 1);
-        let mut ctx = vortex_array::array_session().create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
 
         let error = BloomContains
             .execute(&options, &args, &mut ctx)
@@ -437,7 +444,7 @@ mod tests {
         let filters = VarBinViewArray::from_iter_bin([vec![0; 32]]).into_array();
         let needle = ConstantArray::new(42i64, 1).into_array();
         let args = VecExecutionArgs::new(vec![filters, needle], 1);
-        let mut ctx = vortex_array::array_session().create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
 
         let error = BloomContains
             .execute(&options, &args, &mut ctx)
@@ -459,10 +466,34 @@ mod tests {
         )
         .into_array();
         let args = VecExecutionArgs::new(vec![filters, needle], 1);
-        let mut ctx = vortex_array::array_session().create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
 
         let actual = BloomContains.execute(&options, &args, &mut ctx)?;
         assert_arrays_eq!(actual, BoolArray::from_iter([None::<bool>]), &mut ctx);
+        Ok(())
+    }
+
+    #[test]
+    fn check_nullability_validity_is_correct() -> VortexResult<()> {
+        let options = BloomOptions::default();
+        let filters = VarBinViewArray::from_iter_bin([serialized_filter(
+            &options,
+            &[Scalar::primitive(42_i64, Nullability::NonNullable)],
+        )?])
+        .into_array();
+        let needle =
+            ConstantArray::new(Scalar::primitive(42_i64, Nullability::Nullable), 1).into_array();
+        let mut ctx = array_session().create_execution_ctx();
+
+        let planned = ScalarFnArray::try_new(BloomContains.bind(options), vec![filters, needle])?;
+        let expected_dtype = planned.dtype().clone();
+
+        // If the validity types are wrong (e.g. `bool? != bool`), `execute` will raise an error.
+        // The asserts that follow are just extra guards.
+        let actual = planned.into_array().execute::<BoolArray>(&mut ctx)?;
+
+        assert_eq!(actual.dtype(), &expected_dtype);
+        assert_arrays_eq!(actual, BoolArray::from_iter([Some(true)]), &mut ctx);
         Ok(())
     }
 
@@ -483,7 +514,7 @@ mod tests {
         )
         .into_array();
         let args = VecExecutionArgs::new(vec![filters, needle], 1);
-        let mut ctx = vortex_array::array_session().create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
 
         let error = BloomContains
             .execute(&options, &args, &mut ctx)
@@ -508,7 +539,7 @@ mod tests {
 
         let needle = ConstantArray::new(42i64, 2).into_array();
         let args = VecExecutionArgs::new(vec![filters, needle], 2);
-        let mut ctx = vortex_array::array_session().create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
 
         let actual = BloomContains.execute(&options, &args, &mut ctx)?;
         assert_arrays_eq!(actual, BoolArray::from_iter([None::<bool>, None]), &mut ctx);
@@ -531,7 +562,7 @@ mod tests {
         .into_array();
         let needle = ConstantArray::new(42i64, 3).into_array();
         let args = VecExecutionArgs::new(vec![filters, needle], 3);
-        let mut ctx = vortex_array::array_session().create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
 
         let actual = BloomContains.execute(&options, &args, &mut ctx)?;
         assert_arrays_eq!(
@@ -558,7 +589,7 @@ mod tests {
 
         let needle = ConstantArray::new(42i64, 2).into_array();
         let args = VecExecutionArgs::new(vec![filters, needle], 2);
-        let mut ctx = vortex_array::array_session().create_execution_ctx();
+        let mut ctx = array_session().create_execution_ctx();
 
         let actual = BloomContains.execute(&options, &args, &mut ctx)?;
         assert_arrays_eq!(
