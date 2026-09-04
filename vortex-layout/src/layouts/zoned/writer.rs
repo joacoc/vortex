@@ -48,9 +48,10 @@ pub struct ZonedLayoutOptions {
     pub aggregate_fns: Option<Arc<[AggregateFnRef]>>,
     /// Additional skip indexes to build for each block.
     ///
-    /// **Note:** Register each index with the writing and reading sessions using
-    /// `session.register_skip_index(...);`. This lets the writer build
-    /// the index and readers use it for pruning.
+    /// **Note:** Register each skip index implementation with the writing and
+    /// reading sessions using `session.register_skip_index::<T>()`. The
+    /// configured instances in this list determine the options written to the
+    /// file.
     pub skip_indexes: Option<Arc<[SkipIndexRef]>>,
     /// Number of chunks to compute aggregate partials in parallel.
     pub concurrency: NonZeroUsize,
@@ -214,8 +215,6 @@ mod tests {
     use vortex_array::ArrayContext;
     use vortex_array::IntoArray;
     use vortex_array::aggregate_fn::AggregateFnVTable;
-    use vortex_array::aggregate_fn::AggregateFnVTableExt;
-    use vortex_array::aggregate_fn::NumericalAggregateOpts;
     use vortex_array::aggregate_fn::fns::bounded_max::BoundedMax;
     use vortex_array::aggregate_fn::fns::bounded_min::BoundedMin;
     use vortex_array::aggregate_fn::fns::max::Max;
@@ -224,11 +223,14 @@ mod tests {
     use vortex_array::aggregate_fn::fns::null_count::NullCount;
     use vortex_array::aggregate_fn::fns::sum::Sum;
     use vortex_array::arrays::ChunkedArray;
+    use vortex_array::arrays::DecimalArray;
     use vortex_array::dtype::DType;
+    use vortex_array::dtype::DecimalDType;
     use vortex_array::dtype::Nullability;
     use vortex_array::dtype::PType;
     use vortex_array::extension::datetime::TimeUnit;
     use vortex_array::extension::datetime::Timestamp;
+    use vortex_array::validity::Validity;
     use vortex_buffer::buffer;
     use vortex_error::VortexExpect;
     use vortex_io::runtime::Handle;
@@ -241,18 +243,19 @@ mod tests {
     use crate::layouts::chunked::writer::ChunkedLayoutStrategy;
     use crate::layouts::flat::writer::FlatLayoutStrategy;
     use crate::layouts::zoned::Zoned;
+    use crate::layouts::zoned::aggregates::bloom_filter::BloomFilter;
+    use crate::layouts::zoned::aggregates::bloom_filter::BloomOptions;
     use crate::layouts::zoned::schema::default_bounded_stat_max_bytes;
-    use crate::layouts::zoned::skip_index::SkipIndex;
+    use crate::layouts::zoned::skip_index::bloom::BloomSkipIndex;
     use crate::segments::TestSegments;
     use crate::sequence::SequenceId;
     use crate::sequence::SequentialArrayStreamExt;
     use crate::session::LayoutSession;
 
-    /// Write three zones of primitives through `ctx`, returning the aggregates the zoned
-    /// layout recorded.
-    fn write_zones_with_options(
+    fn write_zones_with_options_and_values(
         ctx: LayoutWriterContext,
         options: ZonedLayoutOptions,
+        chunks: ChunkedArray,
     ) -> VortexResult<Vec<String>> {
         let strategy = ZonedStrategy::new(
             ChunkedLayoutStrategy::new(FlatLayoutStrategy::default()),
@@ -260,14 +263,7 @@ mod tests {
             options,
         );
         let (ptr, eof) = SequenceId::root().split();
-        let stream = ChunkedArray::from_iter([
-            buffer![1, 2, 3].into_array(),
-            buffer![4, 5, 6].into_array(),
-            buffer![7, 8, 9].into_array(),
-        ])
-        .into_array()
-        .to_array_stream()
-        .sequenced(ptr);
+        let stream = chunks.into_array().to_array_stream().sequenced(ptr);
 
         let layout = block_on(|handle: Handle| async move {
             let session = vortex_array::array_session()
@@ -293,14 +289,35 @@ mod tests {
             .collect())
     }
 
+    /// Write three zones of primitives using custom zone options through `ctx`,
+    /// returning the aggregates the zoned layout recorded.
+    fn write_zones_with_options(
+        ctx: LayoutWriterContext,
+        options: ZonedLayoutOptions,
+    ) -> VortexResult<Vec<String>> {
+        write_zones_with_options_and_values(ctx, options, zone_chunk_values())
+    }
+
+    /// Write three zones of primitives through `ctx`, returning the aggregates the zoned
+    /// layout recorded.
     fn write_zones(ctx: LayoutWriterContext) -> VortexResult<Vec<String>> {
-        write_zones_with_options(
+        write_zones_with_options_and_values(
             ctx,
             ZonedLayoutOptions {
                 block_size: NonZeroUsize::new(3).vortex_expect("non zero"),
                 ..Default::default()
             },
+            zone_chunk_values(),
         )
+    }
+
+    #[inline]
+    fn zone_chunk_values() -> ChunkedArray {
+        ChunkedArray::from_iter([
+            buffer![1, 2, 3].into_array(),
+            buffer![4, 5, 6].into_array(),
+            buffer![7, 8, 9].into_array(),
+        ])
     }
 
     #[test]
@@ -378,59 +395,55 @@ mod tests {
         );
     }
 
-    // TODO (joacoc): replace with bloom skip index after merge <https://github.com/vortex-data/vortex/pull/9398>
-    // Just a small skip-index implementation used to test the zoned writer until the bloom filter lands.
-    struct TestSkipIndex {
-        aggregate_fn: Option<AggregateFnRef>,
-    }
-
-    impl TestSkipIndex {
-        fn new(aggregate_fn: AggregateFnRef) -> Self {
-            Self {
-                aggregate_fn: Some(aggregate_fn),
-            }
-        }
-
-        fn unsupported() -> Self {
-            Self { aggregate_fn: None }
-        }
-
-        fn into_ref(self) -> SkipIndexRef {
-            SkipIndexRef::new(Arc::new(self))
-        }
-    }
-
-    impl SkipIndex for TestSkipIndex {
-        fn aggregate_fn(&self, _input_dtype: &DType) -> Option<AggregateFnRef> {
-            self.aggregate_fn.clone()
-        }
-
-        fn register(&self, _session: &VortexSession) {}
-    }
-
     #[test]
     fn writer_appends_skip_index_aggregate() -> VortexResult<()> {
-        let options = ZonedLayoutOptions::default().with_skip_index(
-            TestSkipIndex::new(Sum.bind(NumericalAggregateOpts::default())).into_ref(),
-        );
+        let options = ZonedLayoutOptions::default()
+            .with_skip_index(BloomSkipIndex::new(BloomOptions::default()).into());
         let written =
             write_zones_with_options(LayoutWriterContext::new(ArrayContext::empty()), options)?;
 
+        // Should include defaults, plus bloom filter.
         assert!(
-            written.contains(&Sum.id().to_string()),
-            "expected aggregation id present, wrote {written:?}"
+            written
+                == [
+                    BloomFilter {}.id().to_string(),
+                    Max {}.id().to_string(),
+                    Min {}.id().to_string(),
+                    NullCount {}.id().to_string()
+                ],
+            "expected bloom and defaults present, wrote {written:?}"
         );
         Ok(())
     }
 
     #[test]
     fn writer_rejects_skip_index_unsupported_for_dtype() -> VortexResult<()> {
-        let options =
-            ZonedLayoutOptions::default().with_skip_index(TestSkipIndex::unsupported().into_ref());
+        let options = ZonedLayoutOptions::default()
+            .with_skip_index(BloomSkipIndex::new(BloomOptions::default()).into());
 
-        let error =
-            write_zones_with_options(LayoutWriterContext::new(ArrayContext::empty()), options)
-                .expect_err("unsupported skip index should fail the write");
+        // Decimals are not supported yet.
+        let decimal_dtype = DecimalDType::new(5, 2);
+        let dtype = DType::Decimal(decimal_dtype, Nullability::NonNullable);
+
+        let chunk = DecimalArray::new(
+            buffer![1i32, 2i32, -3i32],
+            decimal_dtype,
+            Validity::NonNullable,
+        );
+        let error = write_zones_with_options_and_values(
+            LayoutWriterContext::new(ArrayContext::empty()),
+            options,
+            ChunkedArray::try_new(
+                vec![
+                    chunk.clone().into_array(),
+                    chunk.clone().into_array(),
+                    chunk.into_array(),
+                ],
+                dtype,
+            )
+            .vortex_expect("valid chunk"),
+        )
+        .expect_err("unsupported skip index should fail the write");
         assert!(
             error.to_string().contains("unsupported for type"),
             "unexpected error: {error}"

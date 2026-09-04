@@ -28,11 +28,10 @@ use vortex_array::aggregate_fn::session::AggregateFnSessionExt;
 use vortex_array::dtype::DType;
 use vortex_session::VortexSession;
 
-mod min_max;
-
 use crate::layouts::zoned::aggregates::min_max::min_max_aggregate_fns;
 
 pub mod bloom_filter;
+mod min_max;
 
 pub(super) fn default_zoned_aggregate_fns(
     dtype: &DType,
@@ -59,33 +58,32 @@ pub(super) fn default_zoned_aggregate_fns(
 
 #[cfg(test)]
 mod tests {
+    use vortex_array::aggregate_fn::AggregateFnVTableExt;
     use vortex_array::aggregate_fn::fns::sum::Sum;
     use vortex_array::dtype::DType;
     use vortex_array::dtype::Nullability;
+    use vortex_array::dtype::PType;
     use vortex_array::extension::datetime::TimeUnit;
     use vortex_array::extension::datetime::Timestamp;
 
+    use super::bloom_filter::BloomOptions;
     use super::default_zoned_aggregate_fns;
+    use crate::layouts::zoned::aggregates::bloom_filter::BloomFilter;
 
-    // TODO (joacoc)
-    // Uncomment after merging the BloomFilter https://github.com/vortex-data/vortex/pull/9398.
-    //
-    // use super::BloomFilter;
-    // use super::bloom_filter::BloomOptions;
-    // use super::default_zoned_aggregate_fns;
-    //
-    // #[test]
-    // fn default_aggregates_exclude_bloom_filter() {
-    //     let aggregate_fns =
-    //         default_zoned_aggregate_fns(&PType::I64.into(), &vortex_array::array_session());
-    //     let bloom = BloomFilter.bind(BloomOptions::default());
+    #[test]
+    fn default_aggregates_exclude_bloom_filter() {
+        let aggregate_fns = default_zoned_aggregate_fns(
+            &DType::Primitive(PType::I64, Nullability::Nullable),
+            &vortex_array::array_session(),
+        );
+        let bloom = BloomFilter.bind(BloomOptions::default());
 
-    //     assert!(
-    //         aggregate_fns
-    //             .iter()
-    //             .all(|aggregate_fn| aggregate_fn != &bloom)
-    //     );
-    // }
+        assert!(
+            aggregate_fns
+                .iter()
+                .all(|aggregate_fn| aggregate_fn != &bloom)
+        );
+    }
 
     #[test]
     fn default_aggregates_skip_sum_for_non_summable_dtype() {
