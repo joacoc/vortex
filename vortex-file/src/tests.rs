@@ -1,3 +1,4 @@
+
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
@@ -2349,6 +2350,34 @@ async fn test_writer_with_statistics() -> VortexResult<()> {
         Precision::exact(ScalarValue::from(0u64))
     );
     assert_eq!(summary.row_count(), 5);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn file_footer_contains_is_sorted() -> VortexResult<()> {
+    let array = StructArray::from_fields(&[("numbers", buffer![1u32, 2, 3, 4, 5].into_array())])?
+        .into_array();
+
+    let mut buf = ByteBufferMut::empty();
+    let mut writer = SESSION
+        .write_options()
+        .with_file_statistics(vec![Stat::IsSorted, Stat::IsStrictSorted])
+        .writer(&mut buf, array.dtype().clone());
+
+    writer.push(array).await?;
+
+    let summary = writer.finish().await?;
+    let stats_set = summary
+        .footer()
+        .statistics()
+        .vortex_expect("statistics were written")
+        .stats_sets()
+        .first()
+        .expect("valid set");
+
+    assert_eq!(stats_set.get(Stat::IsSorted), Precision::exact(true));
+    assert_eq!(stats_set.get(Stat::IsStrictSorted), Precision::exact(true));
 
     Ok(())
 }
