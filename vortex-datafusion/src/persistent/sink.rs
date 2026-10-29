@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use datafusion_common::DataFusionError;
 use datafusion_common::Result as DFResult;
 use datafusion_common::exec_datafusion_err;
-use datafusion_common_runtime::JoinSet;
 use datafusion_common_runtime::SpawnedTask;
+use datafusion_common_runtime::TaskSet;
 use datafusion_datasource::display::FileGroupDisplay;
 use datafusion_datasource::file_sink_config::FileSink;
 use datafusion_datasource::file_sink_config::FileSinkConfig;
@@ -118,12 +118,13 @@ impl FileSink for VortexSink {
 
     async fn spawn_writer_tasks_and_join(
         &self,
-        _context: &Arc<TaskContext>,
+        context: &Arc<TaskContext>,
         demux_task: SpawnedTask<DFResult<()>>,
         mut file_stream_rx: DemuxedStreamReceiver,
         object_store: Arc<dyn ObjectStore>,
     ) -> DFResult<u64> {
-        let mut file_write_tasks: JoinSet<DFResult<(Path, WriteSummary)>> = JoinSet::new();
+        let mut file_write_tasks: TaskSet<DFResult<(Path, WriteSummary)>> =
+            TaskSet::new(context.task_executor().clone());
         let writer_schema = get_writer_schema(&self.config);
         let dtype = self
             .session
@@ -135,7 +136,8 @@ impl FileSink for VortexSink {
 
         // TODO(adamg):
         // 1. We can probably be better at signaling how much memory we're consuming (potentially when reading too), see ParquetSink::spawn_writer_tasks_and_join.
-        while let Some((path, rx)) = file_stream_rx.recv().await {
+        while let Some((metadata, rx)) = file_stream_rx.recv().await {
+            let path = metadata.path;
             let session = self.session.clone();
             let object_store = Arc::clone(&object_store);
 
@@ -192,7 +194,7 @@ impl FileSink for VortexSink {
                     if e.is_panic() {
                         std::panic::resume_unwind(e.into_panic());
                     } else {
-                        unreachable!();
+                        return Err(DataFusionError::from(e));
                     }
                 }
             }
@@ -201,7 +203,7 @@ impl FileSink for VortexSink {
         demux_task
             .join_unwind()
             .await
-            .map_err(|e| DataFusionError::ExecutionJoin(Box::new(e)))??;
+            .map_err(DataFusionError::from)??;
 
         Ok(row_count)
     }
